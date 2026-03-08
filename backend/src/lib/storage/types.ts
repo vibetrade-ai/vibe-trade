@@ -12,8 +12,14 @@ export interface ConversationStore {
   list(): Promise<ConversationMeta[]>;
 }
 
+export interface MemoryStore {
+  read(): Promise<string>;
+  write(content: string): Promise<void>;
+}
+
 export interface StorageProvider {
   conversations: ConversationStore;
+  memory: MemoryStore;
   // strategies: StrategyStore;   — future phase
   // portfolio: PortfolioStore;   — future phase
 }

@@ -2,10 +2,10 @@ import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
 import { DhanClient } from "../lib/dhan/client.js";
-import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription } from "../lib/tools.js";
+import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool } from "../lib/tools.js";
 import { DhanTokenExpiredError } from "../types.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
-import type { ConversationStore } from "../lib/storage/index.js";
+import type { ConversationStore, MemoryStore } from "../lib/storage/index.js";
 
 const anthropic = new Anthropic();
 
@@ -30,13 +30,18 @@ Error handling:
 - Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means Dhan's servers are having issues
 - If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
 
-export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore }) {
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore }) {
   fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
     const dhanClient = new DhanClient();
     const pendingApprovals = new Map<string, (approved: boolean) => void>();
     const conversationId =
       (request.query as { conversationId?: string }).conversationId ?? randomUUID();
     const conversationHistory: Anthropic.MessageParam[] = await opts.store.load(conversationId);
+
+    const updateMemoryTool = createUpdateMemoryTool(opts.memory);
+    const localTools: Record<string, ToolDefinition> = { update_memory: updateMemoryTool };
+    const memoryContent = await opts.memory.read();
+    const systemPrompt = SYSTEM_PROMPT + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
 
     function send(msg: ServerMessage) {
       if (socket.readyState === socket.OPEN) {
@@ -67,7 +72,7 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
         for (const msg of clientMsg.messages) {
           conversationHistory.push({ role: msg.role, content: msg.content });
         }
-        await runClaudeLoop(dhanClient, conversationHistory, pendingApprovals, send);
+        await runClaudeLoop(dhanClient, conversationHistory, pendingApprovals, send, systemPrompt, localTools);
         await opts.store.append(conversationId, conversationHistory.slice(saveFrom));
       }
     });
@@ -110,7 +115,9 @@ async function runClaudeLoop(
   dhanClient: DhanClient,
   history: Anthropic.MessageParam[],
   pendingApprovals: Map<string, (approved: boolean) => void>,
-  send: (msg: ServerMessage) => void
+  send: (msg: ServerMessage) => void,
+  systemPrompt: string = SYSTEM_PROMPT,
+  localTools: Record<string, ToolDefinition> = {}
 ) {
   let tokenExpired = false;
 
@@ -119,8 +126,8 @@ async function runClaudeLoop(
       const stream = anthropic.messages.stream({
         model: "claude-sonnet-4-6",
         max_tokens: 8096,
-        system: SYSTEM_PROMPT,
-        tools: getAllToolDefinitions(),
+        system: systemPrompt,
+        tools: getAllToolDefinitions(Object.values(localTools)),
         messages: history,
       });
 
@@ -151,7 +158,7 @@ async function runClaudeLoop(
       const readOnlyPending = new Map<string, Promise<ToolOut>>();
 
       for (const toolUse of toolUses) {
-        const toolDef = TOOLS[toolUse.name];
+        const toolDef = TOOLS[toolUse.name] ?? localTools[toolUse.name];
         if (toolDef && !toolDef.requiresApproval) {
           const args = toolUse.input as Record<string, unknown>;
           send({ type: "tool_use_start", tool: toolUse.name, args });
@@ -160,7 +167,7 @@ async function runClaudeLoop(
       }
 
       for (const toolUse of toolUses) {
-        const toolDef = TOOLS[toolUse.name];
+        const toolDef = TOOLS[toolUse.name] ?? localTools[toolUse.name];
         if (!toolDef) {
           send({ type: "tool_use_result", tool: toolUse.name, result: "Unknown tool", isError: true });
           toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: `TOOL_ERROR: Unknown tool "${toolUse.name}"` });

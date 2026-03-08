@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { DhanClient } from "./dhan/client.js";
+import type { MemoryStore } from "./storage/index.js";
 import {
   getSecurityId,
   getSecurityIds,
@@ -740,6 +741,33 @@ export const TOOLS: Record<string, ToolDefinition> = {
   },
 };
 
-export function getAllToolDefinitions(): Anthropic.Tool[] {
-  return Object.values(TOOLS).map((t) => t.definition);
+export function getAllToolDefinitions(extra: ToolDefinition[] = []): Anthropic.Tool[] {
+  return [...Object.values(TOOLS), ...extra].map((t) => t.definition);
+}
+
+export function createUpdateMemoryTool(store: MemoryStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "update_memory",
+      description:
+        "Persist a note about the user to long-term memory. Call this whenever you learn something stable about the user's preferences, risk style, or analysis approach, or when the user explicitly asks you to remember or forget something. The content you provide completely replaces the current memory — always include everything you want to retain.",
+      input_schema: {
+        type: "object",
+        properties: {
+          content: {
+            type: "string",
+            description:
+              "Full replacement content for MEMORY.md. Use Markdown. Include all preferences you want to remember — this overwrites the previous file.",
+          },
+        },
+        required: ["content"],
+      },
+    },
+    handler: async (args) => {
+      const content = args["content"] as string;
+      await store.write(content);
+      return "Memory updated.";
+    },
+  };
 }

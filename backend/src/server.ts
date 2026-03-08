@@ -22,7 +22,7 @@ async function start() {
   await fastify.register(fastifyWebsocket);
 
   await fastify.register(statusRoute);
-  await fastify.register(chatRoute, { store: storage.conversations });
+  await fastify.register(chatRoute, { store: storage.conversations, memory: storage.memory });
   await fastify.register(conversationsRoute, { store: storage.conversations });
 
   fastify.get("/health", async () => ({ ok: true }));

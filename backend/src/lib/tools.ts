@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { DhanClient } from "./dhan/client.js";
-import type { MemoryStore } from "./storage/index.js";
+import type { MemoryStore, TriggerStore } from "./storage/index.js";
+import type { TradeArgs } from "./heartbeat/types.js";
 import {
   getSecurityId,
   getSecurityIds,
@@ -768,6 +769,137 @@ export function createUpdateMemoryTool(store: MemoryStore): ToolDefinition {
       const content = args["content"] as string;
       await store.write(content);
       return "Memory updated.";
+    },
+  };
+}
+
+export function createRegisterTriggerTool(store: TriggerStore): ToolDefinition {
+  return {
+    requiresApproval: false, // soft triggers; hard triggers get intercepted in chat.ts
+    definition: {
+      name: "register_trigger",
+      description: `Register a conditional market trigger. When the condition fires, it executes the action automatically.
+
+Two condition modes:
+- "code": A JavaScript expression evaluated against the snapshot. Use variables: quotes["SYMBOL"].lastPrice/changePercent/open/high/low, positions (array with .symbol/.quantity/.pnlPercent/.unrealizedPnl), funds.availableBalance, nifty50.lastPrice/changePercent, banknifty.lastPrice/changePercent. Expression must return exactly true to fire.
+- "llm": Natural language condition evaluated by an AI model each tick. Use for nuanced conditions.
+
+Two action types:
+- "reasoning_job": Fires an autonomous Sonnet analysis loop that can queue trade proposals.
+- "hard_order": Executes a trade immediately when condition fires. REQUIRES user approval — you will receive a prompt.
+
+watchSymbols: List every symbol referenced in the condition so the snapshot builder fetches them.
+
+Examples:
+- condition: { mode: "code", expression: "quotes['RELIANCE'].lastPrice < 2800" }
+- condition: { mode: "code", expression: "nifty50.changePercent < -1.5" }
+- condition: { mode: "llm", description: "Market sentiment looks bearish based on news and price action" }`,
+      input_schema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Human-readable trigger name" },
+          scope: { type: "string", enum: ["symbol", "market", "portfolio"] },
+          watchSymbols: {
+            type: "array",
+            items: { type: "string" },
+            description: "All NSE symbols referenced in the condition (for snapshot fetching). Use [] for market/portfolio conditions.",
+          },
+          condition: {
+            type: "object",
+            description: "Trigger condition",
+            properties: {
+              mode: { type: "string", enum: ["code", "llm"] },
+              expression: { type: "string", description: "JS expression (code mode)" },
+              description: { type: "string", description: "Natural language condition (llm mode)" },
+            },
+            required: ["mode"],
+          },
+          action: {
+            type: "object",
+            description: "Action to take when condition fires",
+            properties: {
+              type: { type: "string", enum: ["reasoning_job", "hard_order"] },
+              tradeArgs: {
+                type: "object",
+                description: "Required for hard_order",
+                properties: {
+                  symbol: { type: "string" },
+                  transaction_type: { type: "string", enum: ["BUY", "SELL"] },
+                  quantity: { type: "number" },
+                  order_type: { type: "string", enum: ["MARKET", "LIMIT"] },
+                  price: { type: "number" },
+                },
+                required: ["symbol", "transaction_type", "quantity", "order_type"],
+              },
+            },
+            required: ["type"],
+          },
+          expiresAt: { type: "string", description: "ISO date string — trigger auto-expires if condition never fires by this time" },
+        },
+        required: ["name", "scope", "watchSymbols", "condition", "action"],
+      },
+    },
+    handler: async (args) => {
+      // Hard-order triggers are intercepted in chat.ts before this handler runs
+      const { randomUUID } = await import("crypto");
+      const trigger = {
+        id: randomUUID(),
+        name: args.name as string,
+        scope: args.scope as "symbol" | "market" | "portfolio",
+        watchSymbols: args.watchSymbols as string[],
+        condition: args.condition as { mode: "code"; expression: string } | { mode: "llm"; description: string },
+        action: args.action as { type: "reasoning_job" } | { type: "hard_order"; tradeArgs: TradeArgs },
+        expiresAt: args.expiresAt as string | undefined,
+        createdAt: new Date().toISOString(),
+        active: true,
+        status: "active" as const,
+      };
+      await store.upsert(trigger);
+      return JSON.stringify({ success: true, triggerId: trigger.id, name: trigger.name });
+    },
+  };
+}
+
+export function createCancelTriggerTool(store: TriggerStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "cancel_trigger",
+      description: "Cancel an active trigger by ID. The trigger will be soft-deleted (status set to cancelled).",
+      input_schema: {
+        type: "object",
+        properties: {
+          trigger_id: { type: "string", description: "The trigger ID to cancel" },
+        },
+        required: ["trigger_id"],
+      },
+    },
+    handler: async (args) => {
+      const id = args.trigger_id as string;
+      const trigger = await store.get(id);
+      if (!trigger) return JSON.stringify({ error: `Trigger ${id} not found` });
+      if (trigger.status !== "active") return JSON.stringify({ error: `Trigger ${id} is already ${trigger.status}` });
+      await store.setStatus(id, "cancelled");
+      return JSON.stringify({ success: true, triggerId: id });
+    },
+  };
+}
+
+export function createListTriggersTool(store: TriggerStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "list_triggers",
+      description: "List all currently active triggers.",
+      input_schema: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+    handler: async () => {
+      const triggers = await store.list({ status: "active" });
+      return JSON.stringify(triggers, null, 2);
     },
   };
 }

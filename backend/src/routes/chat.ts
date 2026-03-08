@@ -2,10 +2,10 @@ import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
 import { DhanClient } from "../lib/dhan/client.js";
-import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool } from "../lib/tools.js";
+import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool } from "../lib/tools.js";
 import { DhanTokenExpiredError } from "../types.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
-import type { ConversationStore, MemoryStore } from "../lib/storage/index.js";
+import type { ConversationStore, MemoryStore, TriggerStore, ApprovalStore } from "../lib/storage/index.js";
 
 const anthropic = new Anthropic();
 
@@ -30,7 +30,7 @@ Error handling:
 - Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means Dhan's servers are having issues
 - If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
 
-export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore }) {
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; approvals: ApprovalStore }) {
   fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
     const dhanClient = new DhanClient();
     const pendingApprovals = new Map<string, (approved: boolean) => void>();
@@ -39,7 +39,15 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
     const conversationHistory: Anthropic.MessageParam[] = await opts.store.load(conversationId);
 
     const updateMemoryTool = createUpdateMemoryTool(opts.memory);
-    const localTools: Record<string, ToolDefinition> = { update_memory: updateMemoryTool };
+    const registerTriggerTool = createRegisterTriggerTool(opts.triggers);
+    const cancelTriggerTool = createCancelTriggerTool(opts.triggers);
+    const listTriggersTool = createListTriggersTool(opts.triggers);
+    const localTools: Record<string, ToolDefinition> = {
+      update_memory: updateMemoryTool,
+      register_trigger: registerTriggerTool,
+      cancel_trigger: cancelTriggerTool,
+      list_triggers: listTriggersTool,
+    };
     const memoryContent = await opts.memory.read();
     const systemPrompt = SYSTEM_PROMPT + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
 
@@ -72,7 +80,7 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
         for (const msg of clientMsg.messages) {
           conversationHistory.push({ role: msg.role, content: msg.content });
         }
-        await runClaudeLoop(dhanClient, conversationHistory, pendingApprovals, send, systemPrompt, localTools);
+        await runClaudeLoop(dhanClient, conversationHistory, pendingApprovals, send, systemPrompt, localTools, opts.approvals);
         await opts.store.append(conversationId, conversationHistory.slice(saveFrom));
       }
     });
@@ -117,7 +125,8 @@ async function runClaudeLoop(
   pendingApprovals: Map<string, (approved: boolean) => void>,
   send: (msg: ServerMessage) => void,
   systemPrompt: string = SYSTEM_PROMPT,
-  localTools: Record<string, ToolDefinition> = {}
+  localTools: Record<string, ToolDefinition> = {},
+  approvals?: ApprovalStore
 ) {
   let tokenExpired = false;
 
@@ -159,8 +168,10 @@ async function runClaudeLoop(
 
       for (const toolUse of toolUses) {
         const toolDef = TOOLS[toolUse.name] ?? localTools[toolUse.name];
-        if (toolDef && !toolDef.requiresApproval) {
-          const args = toolUse.input as Record<string, unknown>;
+        const args = toolUse.input as Record<string, unknown>;
+        // Skip register_trigger with hard_order — handled specially below, not pre-launched
+        const isHardOrderTrigger = toolUse.name === "register_trigger" && (args.action as Record<string, unknown>)?.type === "hard_order";
+        if (toolDef && !toolDef.requiresApproval && !isHardOrderTrigger) {
           send({ type: "tool_use_start", tool: toolUse.name, args });
           readOnlyPending.set(toolUse.id, runTool(toolDef, args, dhanClient));
         }
@@ -177,6 +188,36 @@ async function runClaudeLoop(
         const args = toolUse.input as Record<string, unknown>;
         let result: string;
         let isError = false;
+
+        // Special case: register_trigger with hard_order needs user approval
+        if (toolUse.name === "register_trigger" && (args.action as Record<string, unknown>)?.type === "hard_order") {
+          send({ type: "tool_use_start", tool: toolUse.name, args });
+          const requestId = randomUUID();
+          const tradeArgs = (args.action as Record<string, unknown>).tradeArgs as Record<string, unknown>;
+          send({
+            type: "tool_approval_request",
+            requestId,
+            tool: toolUse.name,
+            args,
+            description: `Register hard trigger: "${args.name as string}" — when condition fires, will ${tradeArgs.transaction_type} ${tradeArgs.quantity} × ${tradeArgs.symbol} (${tradeArgs.order_type}${tradeArgs.price ? ` @ ₹${tradeArgs.price}` : ""})`,
+          });
+
+          const approved = await new Promise<boolean>((resolve) => {
+            pendingApprovals.set(requestId, resolve);
+          });
+
+          if (!approved) {
+            result = "User denied this hard trigger.";
+          } else {
+            const out = await runTool(toolDef, args, dhanClient);
+            result = out.result;
+            isError = out.isError;
+            if (out.tokenExpired) tokenExpired = true;
+          }
+          send({ type: "tool_use_result", tool: toolUse.name, result, isError });
+          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+          continue;
+        }
 
         if (toolDef.requiresApproval) {
           send({ type: "tool_use_start", tool: toolUse.name, args });

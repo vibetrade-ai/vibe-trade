@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import type { Trigger, TriggerStatus, PendingApproval, ApprovalStatus, TriggerAuditEntry } from "../heartbeat/types.js";
 
 export interface ConversationMeta {
   id: string;
@@ -17,9 +18,31 @@ export interface MemoryStore {
   write(content: string): Promise<void>;
 }
 
+export interface TriggerStore {
+  list(filter?: { status?: TriggerStatus }): Promise<Trigger[]>;
+  get(id: string): Promise<Trigger | null>;
+  upsert(trigger: Trigger): Promise<void>;
+  setStatus(id: string, status: TriggerStatus, extra?: Partial<Trigger>): Promise<void>;
+  pruneExpired(): Promise<void>;
+}
+
+export interface ApprovalStore {
+  list(filter?: { status?: ApprovalStatus }): Promise<PendingApproval[]>;
+  get(id: string): Promise<PendingApproval | null>;
+  add(approval: PendingApproval): Promise<void>;
+  updateStatus(id: string, status: ApprovalStatus, decidedAt?: string): Promise<void>;
+  pruneExpired(): Promise<void>;
+}
+
+export interface TriggerAuditStore {
+  append(entry: TriggerAuditEntry): Promise<void>;
+  list(): Promise<TriggerAuditEntry[]>;
+}
+
 export interface StorageProvider {
   conversations: ConversationStore;
   memory: MemoryStore;
-  // strategies: StrategyStore;   — future phase
-  // portfolio: PortfolioStore;   — future phase
+  triggers: TriggerStore;
+  approvals: ApprovalStore;
+  triggerAudit: TriggerAuditStore;
 }

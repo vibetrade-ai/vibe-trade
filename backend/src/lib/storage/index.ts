@@ -6,6 +6,9 @@ import { LocalStorageProvider } from "./local/index.js";
 export { type StorageProvider } from "./types.js";
 export { type ConversationStore } from "./types.js";
 export { type MemoryStore } from "./types.js";
+export { type TriggerStore } from "./types.js";
+export { type ApprovalStore } from "./types.js";
+export { type TriggerAuditStore } from "./types.js";
 
 export function createStorageProvider(): StorageProvider {
   // Later: if (process.env.DATABASE_URL) return new DatabaseStorageProvider(...)

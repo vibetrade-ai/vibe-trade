@@ -25,6 +25,7 @@ Rather than scatter file I/O across routes or hard-code a storage backend, we in
 ```typescript
 export interface StorageProvider {
   conversations: ConversationStore;
+  memory: MemoryStore;
   // strategies: StrategyStore;   — future phase
   // portfolio: PortfolioStore;   — future phase
 }
@@ -90,9 +91,10 @@ Any approval request that was `"pending"` when the WebSocket closes is resolved 
 
 ```
 backend/src/lib/storage/
-  types.ts                       — ConversationStore + StorageProvider interfaces
+  types.ts                       — ConversationStore + MemoryStore + StorageProvider interfaces
   local/
     conversation-store.ts        — JSONL implementation (load, append, list)
+    memory-store.ts              — Markdown file implementation (read, write)
     index.ts                     — LocalStorageProvider
   index.ts                       — createStorageProvider() factory
 
@@ -100,6 +102,8 @@ backend/src/routes/
   conversations.ts               — GET /api/conversations (list) + GET /api/conversations/:id/messages (view)
 
 backend/data/                    — runtime data dir (gitignored)
+  <conversationId>.jsonl         — per-conversation message log
+  MEMORY.md                      — persistent user preferences, written by Claude via update_memory tool
 ```
 
 ---
@@ -107,6 +111,6 @@ backend/data/                    — runtime data dir (gitignored)
 ## Consequences
 
 - **Adding a hosted provider** requires: a new class implementing `StorageProvider`, wired into the factory. No route changes.
-- **Adding a new store** (strategies, portfolio) requires: an interface in `types.ts`, a local implementation, a field on `LocalStorageProvider`, and wiring in `server.ts`. Routes remain unaffected.
-- **Testing** routes is straightforward: pass a mock `ConversationStore` via the `opts` argument to `chatRoute`.
+- **Adding a new store** (strategies, portfolio) requires: an interface in `types.ts`, a local implementation, a field on `LocalStorageProvider`, and wiring in `server.ts`. Routes remain unaffected. `MemoryStore` is the first example of this pattern exercised in practice (Phase 5).
+- **Testing** routes is straightforward: pass a mock `ConversationStore` or `MemoryStore` via the `opts` argument to `chatRoute`.
 - **Data inspection** for localhost deployments is as simple as `cat backend/data/<id>.jsonl | jq .`.

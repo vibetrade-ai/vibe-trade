@@ -14,7 +14,7 @@ interface ApprovalRequest {
   description: string;
 }
 
-interface ChatItem {
+export interface ChatItem {
   id: string;
   role: Role;
   content: string;
@@ -98,7 +98,13 @@ function AssistantMessage({ content }: { content: string }) {
   );
 }
 
-export function Chat() {
+interface ChatProps {
+  conversationId: string | null;
+  /** Called after each completed Claude turn — used by the parent to refresh the conversation list */
+  onTurnComplete?: () => void;
+}
+
+export function Chat({ conversationId, onTurnComplete }: ChatProps) {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
   const [connected, setConnected] = useState(false);
@@ -108,10 +114,33 @@ export function Chat() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const currentAssistantIdRef = useRef<string | null>(null);
 
+  // Load history from the backend whenever conversationId changes
+  useEffect(() => {
+    if (!conversationId) return;
+    setItems([]);
+    setThinking(false);
+    setTokenExpired(false);
+    currentAssistantIdRef.current = null;
+
+    const httpUrl = process.env.NEXT_PUBLIC_BACKEND_HTTP_URL ?? "http://localhost:3001";
+    fetch(`${httpUrl}/api/conversations/${conversationId}/messages`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((msgs: Array<{ role: string; text: string; toolName?: string }>) => {
+        setItems(
+          msgs.map((m) => ({
+            id: uid(),
+            role: m.role === "tool" ? "system" : (m.role as Role),
+            content: m.role === "tool" ? "" : m.text,
+            ...(m.toolName && { toolName: m.toolName, toolResult: m.text }),
+          }))
+        );
+      })
+      .catch(() => {
+        // new conversation or backend unreachable — start with empty slate
+      });
+  }, [conversationId]);
+
   const appendText = useCallback((text: string) => {
-    // Capture the ref value NOW (at event-arrival time), not inside the setItems
-    // callback. React 18 batches state updates, so by the time the callback runs,
-    // a subsequent "done" event may have already nullified the ref.
     const id = currentAssistantIdRef.current;
     if (!id) return;
     setItems((prev) =>
@@ -125,9 +154,11 @@ export function Chat() {
     setItems((prev) => [...prev, item]);
   }, []);
 
+  // Open/reopen WebSocket whenever conversationId changes
   useEffect(() => {
+    if (!conversationId) return;
     const wsUrl = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:3001";
-    const ws = new WebSocket(`${wsUrl}/ws/chat`);
+    const ws = new WebSocket(`${wsUrl}/ws/chat?conversationId=${conversationId}`);
     wsRef.current = ws;
 
     ws.onopen = () => setConnected(true);
@@ -178,6 +209,7 @@ export function Chat() {
         case "done": {
           currentAssistantIdRef.current = null;
           setThinking(false);
+          onTurnComplete?.();
           break;
         }
         case "token_expired": {
@@ -194,7 +226,7 @@ export function Chat() {
     };
 
     return () => ws.close();
-  }, [addItem, appendText]);
+  }, [conversationId, addItem, appendText]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -216,7 +248,7 @@ export function Chat() {
         messages: [{ role: "user", content: text }],
       })
     );
-  }, [input, addItem, tokenExpired]);
+  }, [input, addItem]);
 
   const handleApprove = useCallback((requestId: string) => {
     wsRef.current?.send(

@@ -5,6 +5,7 @@ import { DhanClient } from "../lib/dhan/client.js";
 import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription } from "../lib/tools.js";
 import { DhanTokenExpiredError } from "../types.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
+import type { ConversationStore } from "../lib/storage/index.js";
 
 const anthropic = new Anthropic();
 
@@ -29,11 +30,13 @@ Error handling:
 - Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means Dhan's servers are having issues
 - If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
 
-export async function chatRoute(fastify: FastifyInstance) {
-  fastify.get("/ws/chat", { websocket: true }, (socket, _request) => {
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore }) {
+  fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
     const dhanClient = new DhanClient();
     const pendingApprovals = new Map<string, (approved: boolean) => void>();
-    const conversationHistory: Anthropic.MessageParam[] = [];
+    const conversationId =
+      (request.query as { conversationId?: string }).conversationId ?? randomUUID();
+    const conversationHistory: Anthropic.MessageParam[] = await opts.store.load(conversationId);
 
     function send(msg: ServerMessage) {
       if (socket.readyState === socket.OPEN) {
@@ -60,10 +63,12 @@ export async function chatRoute(fastify: FastifyInstance) {
       }
 
       if (clientMsg.type === "message") {
+        const saveFrom = conversationHistory.length;
         for (const msg of clientMsg.messages) {
           conversationHistory.push({ role: msg.role, content: msg.content });
         }
         await runClaudeLoop(dhanClient, conversationHistory, pendingApprovals, send);
+        await opts.store.append(conversationId, conversationHistory.slice(saveFrom));
       }
     });
 

@@ -4,6 +4,7 @@ import { LocalMemoryStore } from "./memory-store.js";
 import { LocalTriggerStore } from "./trigger-store.js";
 import { LocalApprovalStore } from "./approval-store.js";
 import { LocalTriggerAuditStore } from "./trigger-audit-store.js";
+import { LocalScheduleStore, LocalScheduleRunStore } from "../../scheduler/store.js";
 
 export class LocalStorageProvider implements StorageProvider {
   conversations: LocalConversationStore;
@@ -11,6 +12,8 @@ export class LocalStorageProvider implements StorageProvider {
   triggers: LocalTriggerStore;
   approvals: LocalApprovalStore;
   triggerAudit: LocalTriggerAuditStore;
+  schedules: LocalScheduleStore;
+  scheduleRuns: LocalScheduleRunStore;
 
   constructor(dataDir: string) {
     this.conversations = new LocalConversationStore(dataDir);
@@ -18,5 +21,7 @@ export class LocalStorageProvider implements StorageProvider {
     this.triggers = new LocalTriggerStore(dataDir);
     this.approvals = new LocalApprovalStore(dataDir);
     this.triggerAudit = new LocalTriggerAuditStore(dataDir);
+    this.schedules = new LocalScheduleStore(dataDir);
+    this.scheduleRuns = new LocalScheduleRunStore(dataDir);
   }
 }

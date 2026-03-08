@@ -12,7 +12,8 @@ export interface TradeArgs {
 
 export type TriggerCondition =
   | { mode: "code"; expression: string }
-  | { mode: "llm"; description: string };
+  | { mode: "llm"; description: string }
+  | { mode: "time"; fireAt: string };
 
 export type TriggerAction =
   | { type: "reasoning_job" }

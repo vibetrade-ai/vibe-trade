@@ -2,9 +2,10 @@ import { randomUUID } from "crypto";
 import type { DhanClient } from "../dhan/client.js";
 import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore } from "../storage/index.js";
 import { buildSnapshot } from "./snapshot.js";
-import { evaluateCodeTriggers, evaluateLlmTriggers } from "./evaluator.js";
+import { evaluateCodeTriggers, evaluateLlmTriggers, evaluateTimeTriggers } from "./evaluator.js";
 import { runReasoningJob } from "./runner.js";
 import { getSecurityId } from "../dhan/instruments.js";
+import { getMarketStatus } from "../market-calendar.js";
 
 export class HeartbeatService {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -51,17 +52,34 @@ export class HeartbeatService {
         return;
       }
 
-      const snapshot = await buildSnapshot(this.dhan, activeTriggers);
-
+      const timeTriggers = activeTriggers.filter(t => t.condition.mode === "time");
       const codeTriggers = activeTriggers.filter(t => t.condition.mode === "code");
       const llmTriggers  = activeTriggers.filter(t => t.condition.mode === "llm");
 
-      const [codeFired, llmFired] = await Promise.all([
-        Promise.resolve(evaluateCodeTriggers(snapshot, codeTriggers)),
-        evaluateLlmTriggers(snapshot, llmTriggers),
-      ]);
+      const timeFired = evaluateTimeTriggers(timeTriggers);
 
-      const firedIds = [...new Set([...codeFired, ...llmFired])];
+      let codeFired: string[] = [];
+      let llmFired: string[] = [];
+      let snapshot: import("./types.js").SystemSnapshot | null = null;
+
+      const marketStatus = getMarketStatus();
+      const isMarketActive = marketStatus.session === "pre_market"
+        || marketStatus.session === "open"
+        || marketStatus.session === "post_market";
+
+      if (codeTriggers.length > 0 || llmTriggers.length > 0) {
+        if (!isMarketActive) {
+          console.log(`[heartbeat] market ${marketStatus.session} — skipping ${codeTriggers.length + llmTriggers.length} code/llm trigger(s) until ${marketStatus.next_open}`);
+        } else {
+          snapshot = await buildSnapshot(this.dhan, activeTriggers);
+          [codeFired, llmFired] = await Promise.all([
+            Promise.resolve(evaluateCodeTriggers(snapshot, codeTriggers)),
+            evaluateLlmTriggers(snapshot, llmTriggers),
+          ]);
+        }
+      }
+
+      const firedIds = [...new Set([...timeFired, ...codeFired, ...llmFired])];
 
       if (firedIds.length > 0) {
         console.log(`[heartbeat] fired: ${firedIds.join(", ")}`);
@@ -72,6 +90,11 @@ export class HeartbeatService {
         if (!trigger) continue;
 
         const now = new Date().toISOString();
+
+        // If snapshot is null (only time triggers fired), build minimal snapshot
+        if (!snapshot) {
+          snapshot = await buildSnapshot(this.dhan, []);
+        }
 
         if (trigger.action.type === "hard_order") {
           // Mark as fired immediately

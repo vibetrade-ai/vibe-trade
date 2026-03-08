@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Trigger, TriggerStatus, PendingApproval, ApprovalStatus, TriggerAuditEntry } from "../heartbeat/types.js";
+import type { Schedule, ScheduleStatus, ScheduleRun } from "../scheduler/types.js";
 
 export interface ConversationMeta {
   id: string;
@@ -39,10 +40,26 @@ export interface TriggerAuditStore {
   list(): Promise<TriggerAuditEntry[]>;
 }
 
+export interface ScheduleStore {
+  list(filter?: { status?: ScheduleStatus | ScheduleStatus[] }): Promise<Schedule[]>;
+  get(id: string): Promise<Schedule | null>;
+  upsert(schedule: Schedule): Promise<void>;
+  setStatus(id: string, status: ScheduleStatus): Promise<void>;
+  updateLastRun(id: string, lastRunAt: string, nextRunAt: string): Promise<void>;
+  updateNextRunAt(id: string, nextRunAt: string): Promise<void>;
+}
+
+export interface ScheduleRunStore {
+  append(run: ScheduleRun): Promise<void>;
+  list(limit?: number): Promise<ScheduleRun[]>;
+}
+
 export interface StorageProvider {
   conversations: ConversationStore;
   memory: MemoryStore;
   triggers: TriggerStore;
   approvals: ApprovalStore;
   triggerAudit: TriggerAuditStore;
+  schedules: ScheduleStore;
+  scheduleRuns: ScheduleRunStore;
 }

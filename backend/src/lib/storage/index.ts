@@ -9,6 +9,8 @@ export { type MemoryStore } from "./types.js";
 export { type TriggerStore } from "./types.js";
 export { type ApprovalStore } from "./types.js";
 export { type TriggerAuditStore } from "./types.js";
+export { type ScheduleStore } from "./types.js";
+export { type ScheduleRunStore } from "./types.js";
 
 export function createStorageProvider(): StorageProvider {
   // Later: if (process.env.DATABASE_URL) return new DatabaseStorageProvider(...)

@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { parseExpression } from "cron-parser";
 import { DhanClient } from "./dhan/client.js";
-import type { MemoryStore, TriggerStore } from "./storage/index.js";
+import type { MemoryStore, TriggerStore, ScheduleStore } from "./storage/index.js";
 import type { TradeArgs } from "./heartbeat/types.js";
 import {
   getSecurityId,
@@ -808,9 +809,10 @@ Examples:
             type: "object",
             description: "Trigger condition",
             properties: {
-              mode: { type: "string", enum: ["code", "llm"] },
+              mode: { type: "string", enum: ["code", "llm", "time"] },
               expression: { type: "string", description: "JS expression (code mode)" },
               description: { type: "string", description: "Natural language condition (llm mode)" },
+              fireAt: { type: "string", description: "ISO timestamp for time-mode triggers — fires once when Date.now() >= fireAt" },
             },
             required: ["mode"],
           },
@@ -900,6 +902,161 @@ export function createListTriggersTool(store: TriggerStore): ToolDefinition {
     handler: async () => {
       const triggers = await store.list({ status: "active" });
       return JSON.stringify(triggers, null, 2);
+    },
+  };
+}
+
+// ── SCHEDULE TOOLS ────────────────────────────────────────────────────────────
+
+export function createRegisterScheduleTool(store: ScheduleStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "register_schedule",
+      description: "Register a recurring scheduled LLM run that fires at a cron interval. Use this to set up automated market analysis tasks like premarket scans.",
+      input_schema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Short name for the schedule (e.g. 'Premarket Scan')" },
+          description: { type: "string", description: "What this schedule does" },
+          cronExpression: { type: "string", description: "5-field cron expression in IST (e.g. '15 9 * * 1-5' for 9:15am Mon-Fri)" },
+          tradingDaysOnly: { type: "boolean", description: "If true, skip NSE holidays and weekends" },
+          prompt: { type: "string", description: "The instruction for the LLM when this schedule fires (e.g. 'Read latest news, find intraday opportunities, queue promising trades for approval')" },
+        },
+        required: ["name", "description", "cronExpression", "tradingDaysOnly", "prompt"],
+      },
+    },
+    handler: async (args) => {
+      const { computeNextRunAt, computeNextTradingRunAt } = await import("./scheduler/service.js");
+      const { randomUUID } = await import("crypto");
+
+      const { name, description, cronExpression, tradingDaysOnly, prompt } = args as {
+        name: string; description: string; cronExpression: string; tradingDaysOnly: boolean; prompt: string;
+      };
+
+      // Validate cron expression
+      try {
+        parseExpression(cronExpression, { tz: "Asia/Kolkata" });
+      } catch (err) {
+        return `Error: Invalid cron expression "${cronExpression}": ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      const now = new Date();
+      const nextRunAt = tradingDaysOnly
+        ? computeNextTradingRunAt(cronExpression, now)
+        : computeNextRunAt(cronExpression, now);
+
+      const schedule = {
+        id: randomUUID(),
+        name,
+        description,
+        cronExpression,
+        tradingDaysOnly,
+        prompt,
+        status: "active" as const,
+        nextRunAt,
+        createdAt: now.toISOString(),
+      };
+
+      await store.upsert(schedule);
+      return `Schedule "${name}" registered (id: ${schedule.id}). Next run: ${nextRunAt}`;
+    },
+  };
+}
+
+export function createPauseScheduleTool(store: ScheduleStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "pause_schedule",
+      description: "Pause an active schedule so it no longer fires.",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Schedule ID to pause" },
+        },
+        required: ["id"],
+      },
+    },
+    handler: async (args) => {
+      const { id } = args as { id: string };
+      const schedule = await store.get(id);
+      if (!schedule) return `Error: Schedule "${id}" not found`;
+      await store.setStatus(id, "paused");
+      return `Schedule "${schedule.name}" paused.`;
+    },
+  };
+}
+
+export function createResumeScheduleTool(store: ScheduleStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "resume_schedule",
+      description: "Resume a paused schedule. Recomputes nextRunAt from now.",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Schedule ID to resume" },
+        },
+        required: ["id"],
+      },
+    },
+    handler: async (args) => {
+      const { computeNextRunAt, computeNextTradingRunAt } = await import("./scheduler/service.js");
+      const { id } = args as { id: string };
+      const schedule = await store.get(id);
+      if (!schedule) return `Error: Schedule "${id}" not found`;
+      const now = new Date();
+      const nextRunAt = schedule.tradingDaysOnly
+        ? computeNextTradingRunAt(schedule.cronExpression, now)
+        : computeNextRunAt(schedule.cronExpression, now);
+      await store.setStatus(id, "active");
+      await store.updateNextRunAt(id, nextRunAt);
+      return `Schedule "${schedule.name}" resumed. Next run: ${nextRunAt}`;
+    },
+  };
+}
+
+export function createListSchedulesTool(store: ScheduleStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "list_schedules",
+      description: "List all active (non-deleted) schedules.",
+      input_schema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    handler: async () => {
+      const schedules = await store.list();
+      if (schedules.length === 0) return "No schedules found.";
+      return JSON.stringify(schedules, null, 2);
+    },
+  };
+}
+
+export function createDeleteScheduleTool(store: ScheduleStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "delete_schedule",
+      description: "Delete a schedule permanently.",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Schedule ID to delete" },
+        },
+        required: ["id"],
+      },
+    },
+    handler: async (args) => {
+      const { id } = args as { id: string };
+      const schedule = await store.get(id);
+      if (!schedule) return `Error: Schedule "${id}" not found`;
+      await store.setStatus(id, "deleted");
+      return `Schedule "${schedule.name}" deleted.`;
     },
   };
 }

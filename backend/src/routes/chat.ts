@@ -2,10 +2,10 @@ import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
 import { DhanClient } from "../lib/dhan/client.js";
-import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool } from "../lib/tools.js";
+import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createRegisterScheduleTool, createPauseScheduleTool, createResumeScheduleTool, createListSchedulesTool, createDeleteScheduleTool } from "../lib/tools.js";
 import { DhanTokenExpiredError } from "../types.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
-import type { ConversationStore, MemoryStore, TriggerStore, ApprovalStore } from "../lib/storage/index.js";
+import type { ConversationStore, MemoryStore, TriggerStore, ApprovalStore, ScheduleStore } from "../lib/storage/index.js";
 
 const anthropic = new Anthropic();
 
@@ -30,7 +30,7 @@ Error handling:
 - Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means Dhan's servers are having issues
 - If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
 
-export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; approvals: ApprovalStore }) {
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; approvals: ApprovalStore; schedules: ScheduleStore }) {
   fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
     const dhanClient = new DhanClient();
     const pendingApprovals = new Map<string, (approved: boolean) => void>();
@@ -42,11 +42,21 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
     const registerTriggerTool = createRegisterTriggerTool(opts.triggers);
     const cancelTriggerTool = createCancelTriggerTool(opts.triggers);
     const listTriggersTool = createListTriggersTool(opts.triggers);
+    const registerScheduleTool = createRegisterScheduleTool(opts.schedules);
+    const pauseScheduleTool = createPauseScheduleTool(opts.schedules);
+    const resumeScheduleTool = createResumeScheduleTool(opts.schedules);
+    const listSchedulesTool = createListSchedulesTool(opts.schedules);
+    const deleteScheduleTool = createDeleteScheduleTool(opts.schedules);
     const localTools: Record<string, ToolDefinition> = {
       update_memory: updateMemoryTool,
       register_trigger: registerTriggerTool,
       cancel_trigger: cancelTriggerTool,
       list_triggers: listTriggersTool,
+      register_schedule: registerScheduleTool,
+      pause_schedule: pauseScheduleTool,
+      resume_schedule: resumeScheduleTool,
+      list_schedules: listSchedulesTool,
+      delete_schedule: deleteScheduleTool,
     };
     const memoryContent = await opts.memory.read();
     const systemPrompt = SYSTEM_PROMPT + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");

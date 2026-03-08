@@ -6,9 +6,10 @@ import { Sidebar } from "./Sidebar";
 import { ConnectionBadge } from "./ConnectionBadge";
 import { ApprovalsPanel } from "./ApprovalsPanel";
 import { TriggersPanel } from "./TriggersPanel";
+import { SchedulesPanel } from "./SchedulesPanel";
 import { useApprovals } from "../hooks/useApprovals";
 
-type Tab = "chat" | "approvals" | "triggers";
+type Tab = "chat" | "approvals" | "triggers" | "schedules";
 
 function PendingBadge({ count }: { count: number }) {
   if (count === 0) return null;
@@ -57,6 +58,7 @@ export function ChatLayout() {
     { id: "chat", label: "Chat" },
     { id: "approvals", label: "Approvals" },
     { id: "triggers", label: "Triggers" },
+    { id: "schedules", label: "Schedules" },
   ];
 
   return (
@@ -115,6 +117,13 @@ export function ChatLayout() {
           {activeTab === "triggers" && (
             <div className="flex-1 overflow-hidden flex flex-col">
               <TriggersPanel />
+            </div>
+          )}
+
+          {/* Schedules panel */}
+          {activeTab === "schedules" && (
+            <div className="flex-1 overflow-hidden flex flex-col">
+              <SchedulesPanel />
             </div>
           )}
         </main>

@@ -2,20 +2,42 @@ import vm from "vm";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Trigger, SystemSnapshot } from "./types.js";
 
+export function evaluateTimeTriggers(triggers: Trigger[]): string[] {
+  const now = Date.now();
+  return triggers
+    .filter(t => {
+      const cond = t.condition as { mode: "time"; fireAt: string };
+      return now >= new Date(cond.fireAt).getTime();
+    })
+    .map(t => t.id);
+}
+
 type CodeCondition = { mode: "code"; expression: string };
 type LlmCondition  = { mode: "llm"; description: string };
 
 const anthropic = new Anthropic();
 
+const SAFE_QUOTE = { lastPrice: 0, previousClose: 0, changePercent: 0, open: 0, high: 0, low: 0, symbol: "", securityId: "" };
+
 export function evaluateCodeTriggers(snapshot: SystemSnapshot, triggers: Trigger[]): string[] {
   const fired: string[] = [];
+
+  // Wrap quotes in a Proxy so missing symbols return a zero-value object instead of undefined.
+  // This prevents expressions like `quotes["RELIANCE"].lastPrice` from throwing when the
+  // symbol's quote wasn't fetched (e.g. due to a partial Dhan API failure).
+  const safeQuotes = new Proxy(snapshot.quotes, {
+    get(target, prop: string) {
+      return target[prop] ?? SAFE_QUOTE;
+    },
+  });
+
   for (const trigger of triggers) {
     const cond = trigger.condition as CodeCondition;
     try {
       const result = vm.runInNewContext(
         cond.expression,
         {
-          quotes: snapshot.quotes,
+          quotes: safeQuotes,
           positions: snapshot.positions,
           funds: snapshot.funds,
           nifty50: snapshot.nifty50,
@@ -25,7 +47,7 @@ export function evaluateCodeTriggers(snapshot: SystemSnapshot, triggers: Trigger
       );
       if (result === true) fired.push(trigger.id);
     } catch (err) {
-      console.error(`[heartbeat] code eval error for trigger ${trigger.id}:`, err);
+      console.warn(`[heartbeat] code eval error for trigger ${trigger.id}:`, err instanceof Error ? err.message : err);
     }
   }
   return fired;

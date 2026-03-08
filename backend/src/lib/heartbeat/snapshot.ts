@@ -6,6 +6,9 @@ import { getSecurityId } from "../dhan/instruments.js";
 export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Promise<SystemSnapshot> {
   const status = getMarketStatus();
   const capturedAt = new Date().toISOString();
+  const isMarketActive = status.session === "pre_market"
+    || status.session === "open"
+    || status.session === "post_market";
 
   // Build watchlist (equity symbols only for getQuote)
   const watchSymbols = new Set<string>(triggers.flatMap(t => t.watchSymbols));
@@ -13,10 +16,12 @@ export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Prom
   const indexNames = new Set(["NIFTY50", "BANKNIFTY", "NIFTY", "NIFTYBANK"]);
   const equitySymbols = [...watchSymbols].filter(s => !indexNames.has(s.toUpperCase()));
 
+  // When market is closed, skip live quote fetches — they return stale/zero data.
+  // Positions and funds are account data and are always worth fetching.
   const [positionsRaw, fundsRaw, equityQuotesRaw, indexQuotesRaw] = await Promise.allSettled([
     dhan.getPositions(),
     dhan.getFunds(),
-    equitySymbols.length > 0
+    isMarketActive && equitySymbols.length > 0
       ? (async () => {
           // Resolve security IDs for equity symbols
           const secIdMap: Record<string, string> = {};
@@ -28,7 +33,7 @@ export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Prom
           return { result: await dhan.getQuote(ids, "NSE_EQ"), secIdMap };
         })()
       : Promise.resolve(null),
-    dhan.getQuote(["13", "25"], "IDX_I"),
+    isMarketActive ? dhan.getQuote(["13", "25"], "IDX_I") : Promise.resolve(null),
   ]);
 
   // Parse quotes

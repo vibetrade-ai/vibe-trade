@@ -7,9 +7,11 @@ import { chatRoute } from "./routes/chat.js";
 import { conversationsRoute } from "./routes/conversations.js";
 import { approvalsRoute } from "./routes/approvals.js";
 import { triggersRoute } from "./routes/triggers.js";
+import { schedulesRoute } from "./routes/schedules.js";
 import { createStorageProvider } from "./lib/storage/index.js";
 import { DhanClient } from "./lib/dhan/client.js";
 import { HeartbeatService } from "./lib/heartbeat/service.js";
+import { SchedulerService } from "./lib/scheduler/service.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 
@@ -31,10 +33,12 @@ async function start() {
     memory: storage.memory,
     triggers: storage.triggers,
     approvals: storage.approvals,
+    schedules: storage.schedules,
   });
   await fastify.register(conversationsRoute, { store: storage.conversations });
   await fastify.register(approvalsRoute, { approvals: storage.approvals, triggers: storage.triggers });
   await fastify.register(triggersRoute, { triggers: storage.triggers, triggerAudit: storage.triggerAudit });
+  await fastify.register(schedulesRoute, { schedules: storage.schedules, scheduleRuns: storage.scheduleRuns });
 
   fastify.get("/health", async () => ({ ok: true }));
 
@@ -56,8 +60,19 @@ async function start() {
     console.warn("[heartbeat] Failed to start (likely missing DHAN env vars):", (err as Error).message);
   }
 
+  // Start scheduler
+  let scheduler: SchedulerService | null = null;
+  try {
+    const schedulerDhan = new DhanClient();
+    scheduler = new SchedulerService(schedulerDhan, storage.schedules, storage.scheduleRuns, storage.triggers, storage.approvals, storage.memory);
+    scheduler.start();
+  } catch (err) {
+    console.warn("[scheduler] Failed to start:", (err as Error).message);
+  }
+
   const shutdown = async () => {
     heartbeat?.stop();
+    scheduler?.stop();
     await fastify.close();
     process.exit(0);
   };

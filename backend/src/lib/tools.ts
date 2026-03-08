@@ -7,10 +7,11 @@ import {
   getIndexConstituents,
   getIndexConstituentInfo,
   getIndexSecurityId,
+  isEtf,
 } from "./dhan/instruments.js";
 import { computeIndicators } from "./indicators.js";
 import type { Candle } from "./indicators.js";
-import { getFundamentals } from "./yahoo.js";
+import { getFundamentals, getEtfInfo } from "./yahoo.js";
 import { fetchNews } from "./news.js";
 import { getMarketStatus, isTradingDay, getUpcomingHolidays } from "./market-calendar.js";
 
@@ -100,14 +101,14 @@ export const TOOLS: Record<string, ToolDefinition> = {
     requiresApproval: false,
     definition: {
       name: "get_quote",
-      description: "Get live LTP (last traded price) and OHLC for one or more NSE equity symbols.",
+      description: "Get live LTP (last traded price) and OHLC for one or more NSE equity or ETF symbols.",
       input_schema: {
         type: "object",
         properties: {
           symbols: {
             type: "array",
             items: { type: "string" },
-            description: "List of NSE equity trading symbols, e.g. ['RELIANCE', 'TCS', 'INFY']",
+            description: "List of NSE equity or ETF trading symbols, e.g. ['RELIANCE', 'TCS', 'NIFTYBEES', 'GOLDBEES']",
           },
         },
         required: ["symbols"],
@@ -226,13 +227,13 @@ export const TOOLS: Record<string, ToolDefinition> = {
     requiresApproval: true,
     definition: {
       name: "place_order",
-      description: "Place a BUY or SELL order on NSE equity. Requires user approval before execution.",
+      description: "Place a BUY or SELL order on NSE equity or ETF. Requires user approval before execution.",
       input_schema: {
         type: "object",
         properties: {
           symbol: {
             type: "string",
-            description: "NSE equity trading symbol, e.g. 'RELIANCE'",
+            description: "NSE equity or ETF trading symbol, e.g. 'RELIANCE', 'NIFTYBEES'",
           },
           transaction_type: {
             type: "string",
@@ -300,7 +301,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
     definition: {
       name: "get_historical_data",
       description:
-        "Get historical OHLCV candles for an NSE equity or index symbol (e.g. NIFTY50, BANKNIFTY). Supports intraday (1/5/15/60 min) and daily intervals.",
+        "Get historical OHLCV candles for an NSE equity, ETF, or index symbol (e.g. NIFTY50, BANKNIFTY, NIFTYBEES). Supports intraday (1/5/15/60 min) and daily intervals.",
       input_schema: {
         type: "object",
         properties: {
@@ -381,7 +382,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
     definition: {
       name: "get_fundamentals",
       description:
-        "Get fundamental data for an NSE equity: PE ratio, EPS, growth, ROE, debt/equity, market cap, sector, 52-week range.",
+        "Get fundamental data for an NSE equity (stocks only, not ETFs): PE ratio, EPS, growth, ROE, debt/equity, market cap, sector, 52-week range. For ETFs use get_etf_info instead.",
       input_schema: {
         type: "object",
         properties: {
@@ -396,6 +397,32 @@ export const TOOLS: Record<string, ToolDefinition> = {
     handler: async (args, _client) => {
       const result = await getFundamentals(args.symbol as string);
       return JSON.stringify(result, null, 2);
+    },
+  },
+
+  get_etf_info: {
+    requiresApproval: false,
+    definition: {
+      name: "get_etf_info",
+      description:
+        "Get ETF-specific information: fund family, category, expense ratio, AUM, NAV, top holdings, and sector weightings. For ETFs like NIFTYBEES, GOLDBEES, JUNIORBEES, BANKBEES, LIQUIDBEES.",
+      input_schema: {
+        type: "object",
+        properties: {
+          symbol: {
+            type: "string",
+            description: "NSE ETF symbol, e.g. 'NIFTYBEES', 'GOLDBEES'",
+          },
+        },
+        required: ["symbol"],
+      },
+    },
+    handler: async (args, _client) => {
+      const symbol = args.symbol as string;
+      if (!(await isEtf(symbol))) {
+        return JSON.stringify({ error: `'${symbol}' is not an ETF. Use search_instruments with type='etf' to find ETF symbols.` });
+      }
+      return JSON.stringify(await getEtfInfo(symbol), null, 2);
     },
   },
 
@@ -495,24 +522,33 @@ export const TOOLS: Record<string, ToolDefinition> = {
     requiresApproval: false,
     definition: {
       name: "search_instruments",
-      description: "Search NSE equity instruments by ticker symbol or company name (fuzzy/substring match).",
+      description: "Search NSE equity or ETF instruments by ticker symbol or company/fund name (fuzzy/substring match). Use type='etf' to filter ETFs only.",
       input_schema: {
         type: "object",
         properties: {
           query: {
             type: "string",
-            description: "Search query, e.g. 'bank', 'reliance', 'HDFC'",
+            description: "Search query, e.g. 'bank', 'reliance', 'gold', 'HDFC'",
           },
           limit: {
             type: "number",
             description: "Maximum results to return. Default: 20.",
+          },
+          type: {
+            type: "string",
+            enum: ["all", "equity", "etf"],
+            description: "Filter by instrument type. Default: 'all'. Use 'etf' to list ETFs only.",
           },
         },
         required: ["query"],
       },
     },
     handler: async (args, _client) => {
-      const results = await searchInstruments(args.query as string, (args.limit as number) ?? 20);
+      const results = await searchInstruments(
+        args.query as string,
+        (args.limit as number) ?? 20,
+        (args.type as "equity" | "etf" | "all") ?? "all"
+      );
       return JSON.stringify(results, null, 2);
     },
   },

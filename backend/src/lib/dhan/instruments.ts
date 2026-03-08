@@ -49,7 +49,8 @@ const constituentCache = new Map<string, {
 interface InstrumentRecord {
   symbol: string;
   securityId: string;
-  name: string;
+  name: string;           // human-readable display name (SEM_CUSTOM_SYMBOL)
+  instrumentType: string; // "EQUITY", "ETF", etc. (SEM_INSTRUMENT_NAME)
 }
 
 interface InstrumentCache {
@@ -94,7 +95,8 @@ async function fetchInstruments(): Promise<{
     const secId = (row["SEM_SMST_SECURITY_ID"] || row["SECURITY_ID"] || row["securityId"] || "").trim();
     const exchangeId = (row["SEM_EXM_EXCH_ID"] || row["EXCHANGE"] || row["exchange"] || "").trim().toUpperCase();
     const segmentId = (row["SEM_SEGMENT"] || "").trim().toUpperCase();
-    const name = (row["SEM_INSTRUMENT_NAME"] || row["INSTRUMENT_NAME"] || row["instrumentName"] || symbol).trim();
+    const instrumentType = (row["SEM_INSTRUMENT_NAME"] || "EQUITY").trim().toUpperCase();
+    const displayName = (row["SEM_CUSTOM_SYMBOL"] || row["SM_SYMBOL_NAME"] || row["SEM_INSTRUMENT_NAME"] || symbol).trim();
 
     if (!symbol || !secId) continue;
 
@@ -104,14 +106,15 @@ async function fetchInstruments(): Promise<{
 
     if (isNseEq) {
       map.set(symbol, secId);
-      records.push({ symbol, securityId: secId, name });
+      records.push({ symbol, securityId: secId, name: displayName, instrumentType });
     } else if (isIdxI) {
       const normKey = normalizeIndexKey(symbol);
       indexIdMap.set(normKey, secId);
     }
   }
 
-  console.log(`Instrument master loaded: ${map.size} NSE equity, ${indexIdMap.size} index symbols`);
+  const etfCount = records.filter(r => r.instrumentType === "ETF").length;
+  console.log(`Instrument master loaded: ${map.size} NSE (${etfCount} ETFs), ${indexIdMap.size} index symbols`);
   return { map, indexIdMap, records };
 }
 
@@ -208,12 +211,25 @@ export async function getIndexConstituentInfo(indexName: string): Promise<Consti
 
 export async function searchInstruments(
   query: string,
-  limit = 20
-): Promise<{ symbol: string; security_id: string; name: string }[]> {
+  limit = 20,
+  type: "equity" | "etf" | "all" = "all"
+): Promise<{ symbol: string; security_id: string; name: string; instrument_type: string }[]> {
   const { records } = await ensureCache();
-  const q = query.toLowerCase();
   return records
-    .filter((r) => r.symbol.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))
+    .filter(r => {
+      const q = query.toLowerCase();
+      const matchesQuery = r.symbol.toLowerCase().includes(q) || r.name.toLowerCase().includes(q);
+      if (!matchesQuery) return false;
+      if (type === "etf") return r.instrumentType === "ETF";
+      if (type === "equity") return r.instrumentType === "EQUITY";
+      return true;
+    })
     .slice(0, limit)
-    .map((r) => ({ symbol: r.symbol, security_id: r.securityId, name: r.name }));
+    .map(r => ({ symbol: r.symbol, security_id: r.securityId, name: r.name, instrument_type: r.instrumentType }));
+}
+
+export async function isEtf(symbol: string): Promise<boolean> {
+  const { records } = await ensureCache();
+  const record = records.find(r => r.symbol === symbol.toUpperCase());
+  return record?.instrumentType === "ETF";
 }

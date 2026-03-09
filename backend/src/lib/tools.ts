@@ -597,8 +597,13 @@ export const TOOLS: Record<string, ToolDefinition> = {
       for (let i = 0; i < securityIds.length; i += batchSize) {
         const batch = securityIds.slice(i, i + batchSize);
         const result = await client.getQuote(batch);
-        const nseEq = (result as Record<string, unknown>)["NSE_EQ"];
-        if (Array.isArray(nseEq)) allData.push(...nseEq);
+        // New format: result.data["NSE_EQ"] is an object keyed by securityId string
+        const nseEq = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.["NSE_EQ"] as Record<string, Record<string, unknown>> | undefined;
+        if (nseEq && typeof nseEq === "object") {
+          for (const [secId, q] of Object.entries(nseEq)) {
+            allData.push({ ...q, securityId: secId });
+          }
+        }
       }
 
       type QuoteItem = {
@@ -609,13 +614,17 @@ export const TOOLS: Record<string, ToolDefinition> = {
       };
 
       const items: QuoteItem[] = (allData as Array<Record<string, unknown>>)
-        .filter((q) => q["lastPrice"] && q["previousClose"])
-        .map((q) => ({
-          tradingSymbol: q["tradingSymbol"] as string,
-          lastPrice: q["lastPrice"] as number,
-          previousClose: q["previousClose"] as number,
-          pct_change: +(((q["lastPrice"] as number) - (q["previousClose"] as number)) / (q["previousClose"] as number) * 100).toFixed(2),
-        }));
+        .filter((q) => q["last_price"] && (q["ohlc"] as Record<string, number> | undefined)?.["close"])
+        .map((q) => {
+          const lp = q["last_price"] as number;
+          const pc = (q["ohlc"] as Record<string, number>)["close"];
+          return {
+            tradingSymbol: (q["tradingSymbol"] as string) ?? String(q["securityId"]),
+            lastPrice: lp,
+            previousClose: pc,
+            pct_change: +((lp - pc) / pc * 100).toFixed(2),
+          };
+        });
 
       items.sort((a, b) => b.pct_change - a.pct_change);
       const gainers = items.slice(0, n);
@@ -689,13 +698,20 @@ export const TOOLS: Record<string, ToolDefinition> = {
       // Fetch quotes per segment, merge into quoteMap (keyed by securityId)
       const quoteMap: Record<string, Record<string, unknown>> = {};
       const extractQuotes = (result: unknown, segKey: string) => {
-        const items = (result as Record<string, unknown>)[segKey];
-        if (Array.isArray(items)) {
-          for (const q of items as Array<Record<string, unknown>>) {
-            const id = String(q["securityId"] ?? q["security_id"] ?? "");
-            const sym = (q["tradingSymbol"] as string ?? "").toUpperCase();
-            if (id) quoteMap[id] = q;
-            if (sym) quoteMap[sym] = q;
+        // New format: result.data[segKey] is an object keyed by securityId string
+        const segData = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.[segKey] as Record<string, Record<string, unknown>> | undefined;
+        if (segData && typeof segData === "object") {
+          for (const [secId, q] of Object.entries(segData)) {
+            // Store normalized entry keyed by securityId
+            const normalized: Record<string, unknown> = {
+              securityId: secId,
+              lastPrice: q["last_price"],
+              previousClose: (q["ohlc"] as Record<string, number> | undefined)?.["close"],
+              open: (q["ohlc"] as Record<string, number> | undefined)?.["open"],
+              high: (q["ohlc"] as Record<string, number> | undefined)?.["high"],
+              low: (q["ohlc"] as Record<string, number> | undefined)?.["low"],
+            };
+            quoteMap[secId] = normalized;
           }
         }
       };

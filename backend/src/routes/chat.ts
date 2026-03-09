@@ -97,6 +97,7 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
       if (clientMsg.type === "message") {
         const saveFrom = conversationHistory.length;
         for (const msg of clientMsg.messages) {
+          if (msg.role !== "user" && msg.role !== "assistant") continue;
           conversationHistory.push({ role: msg.role, content: msg.content });
         }
 

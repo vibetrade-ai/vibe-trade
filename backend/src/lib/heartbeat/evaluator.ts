@@ -86,7 +86,9 @@ export async function evaluateLlmTriggers(snapshot: SystemSnapshot, triggers: Tr
       ],
     });
 
-    const text = resp.content[0]?.type === "text" ? resp.content[0].text.trim() : "[]";
+    const raw = resp.content[0]?.type === "text" ? resp.content[0].text.trim() : "[]";
+    // Strip markdown code fences if the model wraps the JSON
+    const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(text) as unknown;
     if (!Array.isArray(parsed)) return [];
     const knownIds = new Set(triggers.map(t => t.id));

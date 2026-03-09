@@ -5,6 +5,25 @@ const BASE_URL = "https://api.dhan.co/v2";
 interface DhanErrorResponse {
   errorCode?: string;
   errorMessage?: string;
+  status?: string;
+  data?: Record<string, string>; // keys are Dhan internal error codes, not security IDs
+}
+
+// Parses Dhan's two error formats:
+//   { errorCode, errorMessage }                        — standard REST errors
+//   { status: "failed", data: { "<errCode>": "msg" } } — market feed errors
+//     Note: the keys in `data` are Dhan's internal error codes, NOT security IDs.
+function parseDhanError(data: DhanErrorResponse, status: number): string {
+  if (data.errorCode === "DH-901") return "TOKEN_EXPIRED";
+  if (data.status === "failed" && data.data && typeof data.data === "object") {
+    const details = Object.entries(data.data).map(([code, msg]) => `${msg} (code ${code})`).join(", ");
+    return details || "Invalid Request";
+  }
+  if (data.errorMessage) {
+    const code = data.errorCode ? ` [${data.errorCode}]` : "";
+    return `${status}${code}: ${data.errorMessage}`;
+  }
+  return JSON.stringify(data);
 }
 
 export class DhanClient {
@@ -30,64 +49,69 @@ export class DhanClient {
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${BASE_URL}${path}`;
-    const res = await fetch(url, {
-      method,
-      headers: this.headers(),
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const maxRetries = 3;
 
-    const text = await res.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = text;
-    }
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const res = await fetch(url, {
+        method,
+        headers: this.headers(),
+        body: body ? JSON.stringify(body) : undefined,
+      });
 
-    // Check for token expiry
-    if (typeof data === "object" && data !== null) {
-      const err = data as DhanErrorResponse;
-      if (err.errorCode === "DH-901") {
-        throw new DhanTokenExpiredError();
+      // Retry on 429 with backoff (respect Retry-After if provided)
+      if (res.status === 429 && attempt < maxRetries) {
+        const retryAfter = res.headers.get("Retry-After");
+        const waitMs = retryAfter
+          ? parseFloat(retryAfter) * 1000
+          : (2 ** attempt) * 1000; // 1s, 2s, 4s
+        console.warn(`[dhan] 429 rate-limited on ${method} ${path}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
       }
-    }
 
-    if (!res.ok) {
-      if (typeof data === "object" && data !== null) {
-        const errData = data as DhanErrorResponse;
-        const code = errData.errorCode ? ` [${errData.errorCode}]` : "";
-        const msg = errData.errorMessage ?? JSON.stringify(data);
-        throw new Error(`Dhan API error ${res.status}${code}: ${msg}`);
+      const text = await res.text();
+      let data: unknown;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
       }
-      throw new Error(`Dhan API error ${res.status}: ${String(data) || res.statusText}`);
+
+      if (!res.ok) {
+        if (typeof data === "object" && data !== null) {
+          const message = parseDhanError(data as DhanErrorResponse, res.status);
+          if (message === "TOKEN_EXPIRED") throw new DhanTokenExpiredError();
+          throw new Error(`Dhan API error ${res.status}: ${message}`);
+        }
+        throw new Error(`Dhan API error ${res.status}: ${String(data) || res.statusText}`);
+      }
+
+      return data as T;
     }
 
-    return data as T;
+    throw new Error(`Dhan API error 429: rate limit exceeded after ${maxRetries} retries on ${method} ${path}`);
   }
 
   async getQuote(securityIds: string[], segment: "NSE_EQ" | "IDX_I" = "NSE_EQ"): Promise<unknown> {
-    // Dhan v2 market quote: POST /marketfeed/ltp
-    return this.request("POST", "/marketfeed/ltp", {
-      [segment]: securityIds,
-    });
+    return this.request("POST", "/marketfeed/ohlc", { [segment]: securityIds.map(Number) });
   }
 
   async getIndexQuote(index: string): Promise<unknown> {
     // Map index name to Dhan index security IDs
-    const indexMap: Record<string, string[]> = {
-      NIFTY50: ["13"],
-      NIFTY_50: ["13"],
-      BANKNIFTY: ["25"],
-      BANK_NIFTY: ["25"],
-      FINNIFTY: ["27"],
-      FIN_NIFTY: ["27"],
+    const indexMap: Record<string, number[]> = {
+      NIFTY50: [13],
+      NIFTY_50: [13],
+      BANKNIFTY: [25],
+      BANK_NIFTY: [25],
+      FINNIFTY: [27],
+      FIN_NIFTY: [27],
     };
     const normalized = index.toUpperCase().replace(/[\s-]/g, "_").replace("NIFTY_BANK", "BANKNIFTY");
     const ids = indexMap[normalized] ?? indexMap[index.toUpperCase()];
     if (!ids) {
       throw new Error(`Unknown index: ${index}. Supported: NIFTY50, BANKNIFTY, FINNIFTY`);
     }
-    return this.request("POST", "/marketfeed/ltp", {
+    return this.request("POST", "/marketfeed/ohlc", {
       IDX_I: ids,
     });
   }
@@ -165,7 +189,7 @@ export class DhanClient {
 
   async getMarketDepth(securityId: string): Promise<unknown> {
     return this.request("POST", "/marketfeed/full", {
-      NSE_EQ: [securityId],
+      NSE_EQ: [Number(securityId)],
     });
   }
 

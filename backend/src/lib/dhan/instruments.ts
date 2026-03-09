@@ -87,8 +87,19 @@ async function fetchInstruments(): Promise<{
   }) as Record<string, string>[];
 
   const map = new Map<string, string>();
+  // TODO(tech-debt): The CSV contains duplicate rows for the same symbol across different
+  // instrument series (EQUITY, ETF, BE, BL, debt, etc.). We resolve ties by preferring
+  // EQUITY > ETF > other. If we ever need to trade BE/BL/debt instruments, this map will
+  // need to be keyed by (symbol, instrumentType) instead of symbol alone.
+  const mapInstrumentType = new Map<string, string>();
   const indexIdMap = new Map<string, string>();
   const records: InstrumentRecord[] = [];
+
+  function instrumentPriority(type: string): number {
+    if (type === "EQUITY") return 2;
+    if (type === "ETF") return 1;
+    return 0;
+  }
 
   for (const row of rows) {
     const symbol = (row["SEM_TRADING_SYMBOL"] || row["TRADING_SYMBOL"] || row["tradingSymbol"] || "").trim().toUpperCase();
@@ -100,13 +111,19 @@ async function fetchInstruments(): Promise<{
 
     if (!symbol || !secId) continue;
 
-    const isIdxI = exchangeId === "IDX_I" || segmentId === "IDX_I";
-    // Preserve original NSE equity condition, excluding IDX_I rows
+    // Dhan CSV uses SEM_SEGMENT="I" for index instruments, not "IDX_I"
+    const isIdxI = segmentId === "I" || segmentId === "IDX_I" || exchangeId === "IDX_I";
     const isNseEq = !isIdxI && (exchangeId === "NSE" || exchangeId === "NSE_EQ");
 
     if (isNseEq) {
-      map.set(symbol, secId);
-      records.push({ symbol, securityId: secId, name: displayName, instrumentType });
+      const existingPriority = instrumentPriority(mapInstrumentType.get(symbol) ?? "");
+      if (instrumentPriority(instrumentType) > existingPriority) {
+        map.set(symbol, secId);
+        mapInstrumentType.set(symbol, instrumentType);
+        const idx = records.findIndex(r => r.symbol === symbol);
+        const rec = { symbol, securityId: secId, name: displayName, instrumentType };
+        if (idx >= 0) records[idx] = rec; else records.push(rec);
+      }
     } else if (isIdxI) {
       const normKey = normalizeIndexKey(symbol);
       indexIdMap.set(normKey, secId);

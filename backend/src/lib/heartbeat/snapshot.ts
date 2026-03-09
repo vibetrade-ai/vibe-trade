@@ -41,24 +41,25 @@ export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Prom
 
   if (equityQuotesRaw.status === "fulfilled" && equityQuotesRaw.value) {
     const { result, secIdMap } = equityQuotesRaw.value as { result: unknown; secIdMap: Record<string, string> };
-    const nseEq = (result as Record<string, unknown>)["NSE_EQ"];
-    if (Array.isArray(nseEq)) {
-      const reverseMap: Record<string, string> = {};
-      for (const [sym, id] of Object.entries(secIdMap)) reverseMap[id] = sym;
-      for (const q of nseEq as Array<Record<string, unknown>>) {
-        const secId = String(q["securityId"] ?? "");
-        const symbol = (q["tradingSymbol"] as string) ?? reverseMap[secId] ?? secId;
-        const lp = (q["lastPrice"] as number) ?? 0;
-        const pc = (q["previousClose"] as number) ?? 0;
+    const reverseMap: Record<string, string> = {};
+    for (const [sym, id] of Object.entries(secIdMap)) reverseMap[id] = sym;
+    // New format: result.data["NSE_EQ"] is an object keyed by securityId string
+    const nseEq = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.["NSE_EQ"] as Record<string, Record<string, unknown>> | undefined;
+    if (nseEq && typeof nseEq === "object") {
+      for (const [secId, q] of Object.entries(nseEq)) {
+        const symbol = reverseMap[secId] ?? secId;
+        const lp = (q["last_price"] as number) ?? 0;
+        const ohlc = q["ohlc"] as Record<string, number> | undefined;
+        const pc = ohlc?.["close"] ?? 0;
         quotes[symbol.toUpperCase()] = {
           symbol: symbol.toUpperCase(),
           securityId: secId,
           lastPrice: lp,
           previousClose: pc,
           changePercent: pc ? +((lp - pc) / pc * 100).toFixed(2) : 0,
-          open: (q["open"] as number) ?? 0,
-          high: (q["high"] as number) ?? 0,
-          low: (q["low"] as number) ?? 0,
+          open: ohlc?.["open"] ?? 0,
+          high: ohlc?.["high"] ?? 0,
+          low: ohlc?.["low"] ?? 0,
         };
       }
     }
@@ -68,21 +69,22 @@ export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Prom
   let nifty50: QuoteEntry | null = null;
   let banknifty: QuoteEntry | null = null;
   if (indexQuotesRaw.status === "fulfilled") {
-    const idxData = (indexQuotesRaw.value as Record<string, unknown>)["IDX_I"];
-    if (Array.isArray(idxData)) {
-      for (const q of idxData as Array<Record<string, unknown>>) {
-        const secId = String(q["securityId"] ?? "");
-        const lp = (q["lastPrice"] as number) ?? 0;
-        const pc = (q["previousClose"] as number) ?? 0;
+    // New format: result.data["IDX_I"] is an object keyed by securityId string
+    const idxData = ((indexQuotesRaw.value as Record<string, unknown>)["data"] as Record<string, unknown>)?.["IDX_I"] as Record<string, Record<string, unknown>> | undefined;
+    if (idxData && typeof idxData === "object") {
+      for (const [secId, q] of Object.entries(idxData)) {
+        const lp = (q["last_price"] as number) ?? 0;
+        const ohlc = q["ohlc"] as Record<string, number> | undefined;
+        const pc = ohlc?.["close"] ?? 0;
         const entry: QuoteEntry = {
           symbol: secId === "13" ? "NIFTY50" : "BANKNIFTY",
           securityId: secId,
           lastPrice: lp,
           previousClose: pc,
           changePercent: pc ? +((lp - pc) / pc * 100).toFixed(2) : 0,
-          open: (q["open"] as number) ?? 0,
-          high: (q["high"] as number) ?? 0,
-          low: (q["low"] as number) ?? 0,
+          open: ohlc?.["open"] ?? 0,
+          high: ohlc?.["high"] ?? 0,
+          low: ohlc?.["low"] ?? 0,
         };
         if (secId === "13") nifty50 = entry;
         else if (secId === "25") banknifty = entry;

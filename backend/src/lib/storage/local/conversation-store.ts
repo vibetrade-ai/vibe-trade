@@ -18,7 +18,8 @@ export class LocalConversationStore implements ConversationStore {
     return raw
       .split("\n")
       .filter((line) => line.trim() !== "")
-      .map((line) => JSON.parse(line) as Anthropic.MessageParam);
+      .map((line) => JSON.parse(line) as Anthropic.MessageParam)
+      .filter((msg) => msg.role === "user" || msg.role === "assistant");
   }
 
   async append(conversationId: string, messages: Anthropic.MessageParam[]): Promise<void> {

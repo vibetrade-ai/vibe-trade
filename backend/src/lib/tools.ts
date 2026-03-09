@@ -18,6 +18,7 @@ import { getFundamentals, getEtfInfo } from "./yahoo.js";
 import { fetchNews } from "./news.js";
 import { getMarketStatus, isTradingDay, getUpcomingHolidays } from "./market-calendar.js";
 import { parseOrderStatus, syncOrders } from "./order-sync.js";
+import { computeOpenPositions } from "./trade-utils.js";
 
 export interface ToolDefinition {
   definition: Anthropic.Tool;
@@ -1140,7 +1141,12 @@ export function createDeleteScheduleTool(store: ScheduleStore): ToolDefinition {
 
 // ── STRATEGY TOOLS ────────────────────────────────────────────────────────────
 
-export function createStrategyTools(store: StrategyStore): ToolDefinition[] {
+export function createStrategyTools(
+  store: StrategyStore,
+  triggerStore?: TriggerStore,
+  scheduleStore?: ScheduleStore,
+  tradeStore?: TradeStore,
+): ToolDefinition[] {
   const createStrategy: ToolDefinition = {
     requiresApproval: false,
     definition: {
@@ -1258,8 +1264,38 @@ The plan field should describe the full trading policy: objectives, entry/exit s
       const { strategy_id } = args as { strategy_id: string };
       const strategy = await store.get(strategy_id);
       if (!strategy) return JSON.stringify({ error: `Strategy ${strategy_id} not found` });
+
+      // Guard: block archive if strategy has open positions
+      if (tradeStore) {
+        const filled = await tradeStore.list({ strategyId: strategy_id, status: "filled" });
+        const openPositions = computeOpenPositions(filled);
+        if (openPositions.length > 0) {
+          return JSON.stringify({
+            error: "Strategy has open positions",
+            openPositions: openPositions.map(p => ({ symbol: p.symbol, quantity: p.quantity })),
+            hint: "Close all tagged positions in Dhan before archiving",
+          });
+        }
+      }
+
+      // Cascade: cancel active triggers + pause active/paused schedules
+      let triggersCancelled = 0;
+      let schedulesPaused = 0;
+      if (triggerStore) {
+        const activeTriggers = await triggerStore.list({ status: "active" });
+        const linked = activeTriggers.filter(t => t.strategyId === strategy_id);
+        await Promise.all(linked.map(t => triggerStore.setStatus(t.id, "cancelled")));
+        triggersCancelled = linked.length;
+      }
+      if (scheduleStore) {
+        const activeSchedules = await scheduleStore.list({ status: ["active", "paused"] });
+        const linked = activeSchedules.filter(s => s.strategyId === strategy_id);
+        await Promise.all(linked.map(s => scheduleStore.setStatus(s.id, "deleted")));
+        schedulesPaused = linked.length;
+      }
+
       await store.setStatus(strategy_id, "archived");
-      return JSON.stringify({ success: true, strategyId: strategy_id, status: "archived" });
+      return JSON.stringify({ success: true, strategyId: strategy_id, status: "archived", triggersCancelled, schedulesDeleted: schedulesPaused });
     },
   };
 

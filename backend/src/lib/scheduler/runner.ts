@@ -149,6 +149,10 @@ export async function runScheduleJob(
     if (schedule.strategyId && strategyStore) {
       const strategy = await strategyStore.get(schedule.strategyId).catch(() => null);
       if (strategy) {
+        if (strategy.status === "archived") {
+          console.warn(`[scheduler] schedule ${schedule.id} linked to archived strategy ${schedule.strategyId} — skipping`);
+          return;
+        }
         const [activeTriggers, fundsRaw] = await Promise.all([
           triggerStore.list({ status: "active" }),
           dhan.getFunds().catch(() => null),

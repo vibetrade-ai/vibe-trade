@@ -1,5 +1,6 @@
 import type { DhanClient } from "./dhan/client.js";
 import type { TradeStore, TradeStatus } from "./storage/types.js";
+import { computeRealizedPnl } from "./trade-utils.js";
 
 export function parseOrderStatus(order: Record<string, unknown>): {
   dhanStatus: string;
@@ -73,12 +74,8 @@ export async function syncOrders(
       if (trade.transactionType === "SELL" && executedPrice) {
         const priorBuys = (await store.list({ symbol: trade.symbol, status: "filled" }))
           .filter(t => t.transactionType === "BUY" && t.executedPrice && (!trade.strategyId || t.strategyId === trade.strategyId));
-        const totalQty = priorBuys.reduce((s, t) => s + t.quantity, 0);
-        const totalCost = priorBuys.reduce((s, t) => s + (t.executedPrice! * t.quantity), 0);
-        if (totalQty > 0) {
-          const avgCost = totalCost / totalQty;
-          patch.realizedPnl = +((executedPrice - avgCost) * trade.quantity).toFixed(2);
-        }
+        const pnl = computeRealizedPnl(executedPrice, trade.quantity, priorBuys);
+        if (pnl !== undefined) patch.realizedPnl = pnl;
       }
 
       await store.update(trade.id, patch);

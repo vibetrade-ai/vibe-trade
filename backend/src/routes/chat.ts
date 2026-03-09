@@ -48,7 +48,7 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
     const resumeScheduleTool = createResumeScheduleTool(opts.schedules);
     const listSchedulesTool = createListSchedulesTool(opts.schedules);
     const deleteScheduleTool = createDeleteScheduleTool(opts.schedules);
-    const strategyToolList = createStrategyTools(opts.strategies);
+    const strategyToolList = createStrategyTools(opts.strategies, opts.triggers, opts.schedules, opts.trades);
     const tradeToolList = createTradeTools(opts.trades);
     const localTools: Record<string, ToolDefinition> = {
       update_memory: updateMemoryTool,

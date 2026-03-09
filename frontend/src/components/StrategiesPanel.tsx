@@ -85,15 +85,24 @@ function EmptyState() {
 function StrategyCard({ strategy, onRefresh, onViewPerformance }: { strategy: Strategy; onRefresh: () => void; onViewPerformance: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const handleArchive = async () => {
-    if (!confirm(`Archive strategy "${strategy.name}"? It will no longer appear in the active list.`)) return;
+    if (!confirm(`Archive "${strategy.name}"?\n\nThis will cancel all linked triggers and delete all linked schedules. The strategy will no longer appear in the active list.\n\nContinue?`)) return;
     setArchiving(true);
+    setArchiveError(null);
     try {
-      await fetch(`${BACKEND_URL}/api/strategies/${strategy.id}`, { method: "DELETE" });
-      onRefresh();
+      const res = await fetch(`${BACKEND_URL}/api/strategies/${strategy.id}`, { method: "DELETE" });
+      if (res.status === 409) {
+        const body = await res.json() as { openPositions?: { symbol: string; quantity: number }[]; hint?: string };
+        const positions = body.openPositions ?? [];
+        const lines = positions.map(p => `• ${p.symbol} × ${p.quantity}`).join("\n");
+        setArchiveError(`Can't archive — open positions:\n${lines}\n${body.hint ?? "Close them in Dhan first."}`);
+        return;
+      }
+      if (res.ok) onRefresh();
     } catch {
-      // ignore
+      // ignore network errors
     } finally {
       setArchiving(false);
     }
@@ -162,6 +171,13 @@ function StrategyCard({ strategy, onRefresh, onViewPerformance }: { strategy: St
           </button>
         </div>
       </div>
+
+      {/* Archive error callout */}
+      {archiveError && (
+        <div className="rounded-lg bg-red-950/40 border border-red-800/40 p-2.5 mt-1">
+          <pre className="text-xs text-red-300 whitespace-pre-wrap font-sans">{archiveError}</pre>
+        </div>
+      )}
     </div>
   );
 }

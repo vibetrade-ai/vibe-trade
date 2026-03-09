@@ -145,6 +145,11 @@ export async function runReasoningJob(
   if (trigger.strategyId && strategyStore) {
     const strategy = await strategyStore.get(trigger.strategyId).catch(() => null);
     if (strategy) {
+      if (strategy.status === "archived") {
+        console.warn(`[heartbeat] trigger ${trigger.id} linked to archived strategy ${trigger.strategyId} — cancelling`);
+        await triggerStore.setStatus(trigger.id, "cancelled");
+        return;
+      }
       const activeTriggers = await triggerStore.list({ status: "active" });
       const linkedTriggers = activeTriggers.filter(t => t.strategyId === strategy.id);
       const triggersBlock = linkedTriggers.length > 0

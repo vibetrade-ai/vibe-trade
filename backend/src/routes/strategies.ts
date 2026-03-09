@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { StrategyStore, TriggerStore, ScheduleStore, TradeStore, TradeRecord } from "../lib/storage/index.js";
 import { DhanClient } from "../lib/dhan/client.js";
+import { computeOpenPositions, computeRealizedPnl } from "../lib/trade-utils.js";
+import { syncOrders } from "../lib/order-sync.js";
 
 export async function strategiesRoute(
   fastify: FastifyInstance,
@@ -84,16 +86,44 @@ export async function strategiesRoute(
     return { success: true };
   });
 
-  // DELETE /api/strategies/:id — archive
+  // DELETE /api/strategies/:id — archive (with open-position guard + cascade)
   fastify.delete("/api/strategies/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const strategy = await opts.strategies.get(id);
-    if (!strategy) {
-      reply.code(404);
-      return { error: "Not found" };
+    if (!strategy) { reply.code(404); return { error: "Not found" }; }
+
+    // Guard: block archive if strategy has open positions
+    const filled = await opts.trades.list({ strategyId: id, status: "filled" });
+    const openPositions = computeOpenPositions(filled);
+    if (openPositions.length > 0) {
+      reply.code(409);
+      return {
+        error: "Strategy has open positions",
+        openPositions: openPositions.map(p => ({ symbol: p.symbol, quantity: p.quantity })),
+        hint: "Close all tagged positions in Dhan before archiving",
+      };
     }
+
+    // Cascade: cancel active triggers + delete active/paused schedules
+    const [activeTriggers, activeSchedules] = await Promise.all([
+      opts.triggers.list({ status: "active" }),
+      opts.schedules.list({ status: ["active", "paused"] }),
+    ]);
+    const linkedTriggers = activeTriggers.filter(t => t.strategyId === id);
+    const linkedSchedules = activeSchedules.filter(s => s.strategyId === id);
+
+    await Promise.all([
+      ...linkedTriggers.map(t => opts.triggers.setStatus(t.id, "cancelled")),
+      ...linkedSchedules.map(s => opts.schedules.setStatus(s.id, "deleted")),
+    ]);
+
     await opts.strategies.setStatus(id, "archived");
-    return { success: true };
+
+    return {
+      success: true,
+      triggersCancelled: linkedTriggers.length,
+      schedulesDeleted: linkedSchedules.length,
+    };
   });
 
   // GET /api/strategies/:id/trades — raw trade records for a strategy
@@ -124,24 +154,7 @@ export async function strategiesRoute(
     const worstTrade = sellsWithPnl.reduce<TradeRecord | null>((w, t) => !w || t.realizedPnl! < w.realizedPnl! ? t : w, null);
 
     // Open positions: net qty per symbol from filled trades
-    const netQty: Record<string, { quantity: number; totalCost: number }> = {};
-    for (const t of filled) {
-      if (!netQty[t.symbol]) netQty[t.symbol] = { quantity: 0, totalCost: 0 };
-      if (t.transactionType === "BUY") {
-        netQty[t.symbol].quantity += t.quantity;
-        netQty[t.symbol].totalCost += (t.executedPrice ?? t.requestedPrice ?? 0) * t.quantity;
-      } else {
-        netQty[t.symbol].quantity -= t.quantity;
-      }
-    }
-    const openPositions = Object.entries(netQty)
-      .filter(([, v]) => v.quantity > 0)
-      .map(([symbol, v]) => ({
-        symbol,
-        quantity: v.quantity,
-        avgBuyPrice: +(v.totalCost / v.quantity).toFixed(2),
-        deployedCapital: +v.totalCost.toFixed(2),
-      }));
+    const openPositions = computeOpenPositions(filled);
 
     const deployedCapital = openPositions.reduce((s, p) => s + p.deployedCapital, 0);
 
@@ -174,39 +187,9 @@ export async function strategiesRoute(
     }
 
     const raw = await dhan.getTradebook();
-    const fills = Array.isArray(raw) ? raw as Record<string, unknown>[] : [];
-    const fillMap = new Map<string, Record<string, unknown>>();
-    for (const fill of fills) {
-      const oid = String(fill["orderId"] ?? fill["order_id"] ?? "");
-      if (oid) fillMap.set(oid, fill);
-    }
-
-    const allPending = await opts.trades.list({ status: "pending" });
-    let updated = 0;
-
-    for (const trade of allPending) {
-      const fill = fillMap.get(trade.orderId);
-      if (!fill) continue;
-
-      const executedPrice = (fill["tradedPrice"] as number | undefined) ?? (fill["traded_price"] as number | undefined);
-      const filledAt = String(fill["updateTime"] ?? fill["exchangeTime"] ?? fill["createTime"] ?? new Date().toISOString());
-      const patch: Partial<TradeRecord> = { status: "filled", executedPrice, filledAt };
-
-      if (trade.transactionType === "SELL" && executedPrice) {
-        const priorBuys = (await opts.trades.list({ symbol: trade.symbol, status: "filled" }))
-          .filter(t => t.transactionType === "BUY" && t.executedPrice && (!trade.strategyId || t.strategyId === trade.strategyId));
-        const totalQty = priorBuys.reduce((s, t) => s + t.quantity, 0);
-        const totalCost = priorBuys.reduce((s, t) => s + t.executedPrice! * t.quantity, 0);
-        if (totalQty > 0) {
-          patch.realizedPnl = +((executedPrice - totalCost / totalQty) * trade.quantity).toFixed(2);
-        }
-      }
-
-      await opts.trades.update(trade.id, patch);
-      updated++;
-    }
-
-    return { tradebookEntries: fills.length, updated };
+    const tradebookEntries = Array.isArray(raw) ? (raw as unknown[]).length : 0;
+    const { fillsUpdated: updated } = await syncOrders(dhan, opts.trades);
+    return { tradebookEntries, updated };
   });
 
   // GET /api/trades — all trades, optionally filtered

@@ -28,6 +28,10 @@ export class LocalTradeStore implements TradeStore {
 
   async append(trade: TradeRecord): Promise<void> {
     const all = await this.load();
+    if (all.some(t => t.orderId === trade.orderId)) {
+      console.warn(`[trade-store] duplicate orderId ${trade.orderId} — skipping`);
+      return;
+    }
     all.push(trade);
     await this.save(all);
   }

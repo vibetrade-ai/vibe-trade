@@ -3,15 +3,23 @@ import type { DhanClient } from "../dhan/client.js";
 import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore, TradeStore } from "../storage/index.js";
 import { buildSnapshot } from "./snapshot.js";
 import { evaluateCodeTriggers, evaluateLlmTriggers, evaluateTimeTriggers } from "./evaluator.js";
+import { evaluateEventTriggers } from "./event-evaluator.js";
 import { runReasoningJob } from "./runner.js";
 import { getSecurityId } from "../dhan/instruments.js";
 import { getMarketStatus } from "../market-calendar.js";
 import { syncOrders } from "../order-sync.js";
+import { fetchNews } from "../news.js";
+import { getFundamentals, getVixQuote } from "../yahoo.js";
+import type { PositionEntry, Trigger, EventDelta, EventCondition } from "./types.js";
+import type { Fundamentals } from "../yahoo.js";
 
 export class HeartbeatService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private activeJobs = 0;
+  private previousPositions: PositionEntry[] = [];
+  private fundamentalsCache = new Map<string, { data: Fundamentals; cachedAt: number }>();
+  private seenHeadlineLinks = new Set<string>();
 
   constructor(
     private readonly dhan: DhanClient,
@@ -40,6 +48,97 @@ export class HeartbeatService {
     console.log("[heartbeat] stopped");
   }
 
+  private async buildEventDelta(
+    snapshot: import("./types.js").SystemSnapshot,
+    eventTriggers: Trigger[],
+  ): Promise<EventDelta> {
+    const prevSymbols = new Set(this.previousPositions.map(p => p.symbol));
+    const currSymbols = new Set(snapshot.positions.map(p => p.symbol));
+    const newPositions     = snapshot.positions.filter(p => !prevSymbols.has(p.symbol));
+    const closedPositions  = this.previousPositions.filter(p => !currSymbols.has(p.symbol));
+
+    // Collect categories needed by news-related event triggers
+    const neededCategories = new Set<string>();
+    for (const t of eventTriggers) {
+      const cond = t.condition as EventCondition;
+      if (cond.kind === "news_mention" || cond.kind === "sentiment_negative" || cond.kind === "sentiment_positive") {
+        for (const cat of cond.categories) neededCategories.add(cat);
+      }
+    }
+
+    // Fetch RSS for needed categories, filter against seen links
+    const newHeadlines: Record<string, import("../news.js").NewsItem[]> = {};
+    for (const cat of neededCategories) {
+      try {
+        const items = await fetchNews(cat as any, 20);
+        const fresh = items.filter(item => {
+          if (this.seenHeadlineLinks.has(item.link)) return false;
+          this.seenHeadlineLinks.add(item.link);
+          return true;
+        });
+        if (fresh.length > 0) newHeadlines[cat] = fresh;
+      } catch (err) {
+        console.warn(`[heartbeat] news fetch error for category "${cat}":`, err instanceof Error ? err.message : err);
+      }
+    }
+
+    // Collect symbols needing fundamentals refresh (pe_below, fundamentals_changed)
+    const neededFundSymbols = new Set<string>();
+    for (const t of eventTriggers) {
+      const cond = t.condition as EventCondition;
+      if (cond.kind === "pe_below" || cond.kind === "pe_above" || cond.kind === "fundamentals_changed") {
+        neededFundSymbols.add(cond.symbol.toUpperCase());
+      }
+    }
+
+    const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+    const now = Date.now();
+    const fundamentals: Record<string, Fundamentals | null> = {};
+    for (const sym of neededFundSymbols) {
+      const cached = this.fundamentalsCache.get(sym);
+      if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
+        fundamentals[sym] = cached.data;
+      } else {
+        try {
+          const data = await getFundamentals(sym);
+          this.fundamentalsCache.set(sym, { data, cachedAt: now });
+          fundamentals[sym] = data;
+        } catch (err) {
+          console.warn(`[heartbeat] fundamentals fetch error for "${sym}":`, err instanceof Error ? err.message : err);
+          fundamentals[sym] = null;
+        }
+      }
+    }
+
+    // Fetch VIX only if a vix_above trigger is active
+    const needsVix = eventTriggers.some(t => {
+      const kind = (t.condition as EventCondition).kind;
+      return kind === "vix_above" || kind === "vix_below";
+    });
+    let vixQuote: EventDelta["vixQuote"] = null;
+    if (needsVix) {
+      try {
+        const v = await getVixQuote();
+        if (v) {
+          vixQuote = {
+            symbol: v.symbol,
+            securityId: "",
+            lastPrice: v.lastPrice,
+            previousClose: 0,
+            changePercent: 0,
+            open: 0,
+            high: 0,
+            low: 0,
+          };
+        }
+      } catch (err) {
+        console.warn("[heartbeat] VIX fetch error:", err instanceof Error ? err.message : err);
+      }
+    }
+
+    return { newPositions, closedPositions, newHeadlines, fundamentals, vixQuote };
+  }
+
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
@@ -55,14 +154,16 @@ export class HeartbeatService {
         return;
       }
 
-      const timeTriggers = activeTriggers.filter(t => t.condition.mode === "time");
-      const codeTriggers = activeTriggers.filter(t => t.condition.mode === "code");
-      const llmTriggers  = activeTriggers.filter(t => t.condition.mode === "llm");
+      const timeTriggers  = activeTriggers.filter(t => t.condition.mode === "time");
+      const codeTriggers  = activeTriggers.filter(t => t.condition.mode === "code");
+      const llmTriggers   = activeTriggers.filter(t => t.condition.mode === "llm");
+      const eventTriggers = activeTriggers.filter(t => t.condition.mode === "event");
 
       const timeFired = evaluateTimeTriggers(timeTriggers);
 
       let codeFired: string[] = [];
       let llmFired: string[] = [];
+      let eventFired: string[] = [];
       let snapshot: import("./types.js").SystemSnapshot | null = null;
 
       const marketStatus = getMarketStatus();
@@ -70,19 +171,23 @@ export class HeartbeatService {
         || marketStatus.session === "open"
         || marketStatus.session === "post_market";
 
-      if (codeTriggers.length > 0 || llmTriggers.length > 0) {
+      if (codeTriggers.length > 0 || llmTriggers.length > 0 || eventTriggers.length > 0) {
         if (!isMarketActive) {
-          console.log(`[heartbeat] market ${marketStatus.session} — skipping ${codeTriggers.length + llmTriggers.length} code/llm trigger(s) until ${marketStatus.next_open}`);
+          console.log(`[heartbeat] market ${marketStatus.session} — skipping ${codeTriggers.length + llmTriggers.length + eventTriggers.length} code/llm/event trigger(s) until ${marketStatus.next_open}`);
         } else {
           snapshot = await buildSnapshot(this.dhan, activeTriggers);
-          [codeFired, llmFired] = await Promise.all([
-            Promise.resolve(evaluateCodeTriggers(snapshot, codeTriggers)),
+          const delta = await this.buildEventDelta(snapshot, eventTriggers);
+          [codeFired, llmFired, eventFired] = await Promise.all([
+            Promise.resolve(evaluateCodeTriggers(snapshot, codeTriggers, delta)),
             evaluateLlmTriggers(snapshot, llmTriggers),
+            evaluateEventTriggers(snapshot, delta, eventTriggers),
           ]);
+          // Update previous positions after tick
+          this.previousPositions = snapshot.positions;
         }
       }
 
-      const firedIds = [...new Set([...timeFired, ...codeFired, ...llmFired])];
+      const firedIds = [...new Set([...timeFired, ...codeFired, ...llmFired, ...eventFired])];
 
       if (firedIds.length > 0) {
         console.log(`[heartbeat] fired: ${firedIds.join(", ")}`);

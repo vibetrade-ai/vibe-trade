@@ -10,10 +10,39 @@ export interface TradeArgs {
   price?: number;
 }
 
+export type EventKind =
+  | "position_opened"
+  | "position_closed"
+  | "news_mention"
+  | "sentiment_positive"
+  | "sentiment_negative"
+  | "pe_below"
+  | "pe_above"
+  | "fundamentals_changed"
+  | "vix_above"
+  | "vix_below"
+  | "nifty_drop_percent"
+  | "nifty_rise_percent";
+
+export type EventCondition =
+  | { mode: "event"; kind: "position_opened"; symbols: string[] }
+  | { mode: "event"; kind: "position_closed"; symbols: string[] }
+  | { mode: "event"; kind: "news_mention"; symbols: string[]; categories: string[] }
+  | { mode: "event"; kind: "sentiment_positive"; symbols: string[]; categories: string[] }
+  | { mode: "event"; kind: "sentiment_negative"; symbols: string[]; categories: string[] }
+  | { mode: "event"; kind: "pe_below"; symbol: string; threshold: number }
+  | { mode: "event"; kind: "pe_above"; symbol: string; threshold: number }
+  | { mode: "event"; kind: "fundamentals_changed"; symbol: string }
+  | { mode: "event"; kind: "vix_above"; threshold: number }
+  | { mode: "event"; kind: "vix_below"; threshold: number }
+  | { mode: "event"; kind: "nifty_drop_percent"; threshold: number }
+  | { mode: "event"; kind: "nifty_rise_percent"; threshold: number };
+
 export type TriggerCondition =
   | { mode: "code"; expression: string }
   | { mode: "llm"; description: string }
-  | { mode: "time"; fireAt: string };
+  | { mode: "time"; fireAt: string }
+  | EventCondition;
 
 export type TriggerAction =
   | { type: "reasoning_job" }
@@ -106,4 +135,12 @@ export interface TriggerAuditEntry {
     | { type: "reasoning_job_queued"; approvalId?: string }
     | { type: "reasoning_job_no_action"; reason: string };
   strategyId?: string;
+}
+
+export interface EventDelta {
+  newPositions: PositionEntry[];
+  closedPositions: PositionEntry[];
+  newHeadlines: Record<string, import("../news.js").NewsItem[]>;
+  fundamentals: Record<string, import("../yahoo.js").Fundamentals | null>;
+  vixQuote: QuoteEntry | null;
 }

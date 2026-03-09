@@ -43,9 +43,14 @@ const RUNNER_TOOLS: Anthropic.Tool[] = [
         condition: {
           type: "object",
           properties: {
-            mode: { type: "string", enum: ["code", "llm"] },
+            mode: { type: "string", enum: ["code", "llm", "event"] },
             expression: { type: "string", description: "For code mode: JS expression against snapshot" },
             description: { type: "string", description: "For llm mode: natural language condition" },
+            kind: { type: "string", enum: ["position_opened", "position_closed", "news_mention", "sentiment_negative", "pe_below", "fundamentals_changed", "vix_above", "nifty_drop_percent"], description: "Event kind (event mode)" },
+            symbols: { type: "array", items: { type: "string" }, description: "Symbols (position/news/sentiment event kinds)" },
+            categories: { type: "array", items: { type: "string" }, description: "RSS categories (news/sentiment event kinds)" },
+            symbol: { type: "string", description: "Single symbol for pe_below / fundamentals_changed" },
+            threshold: { type: "number", description: "Threshold for pe_below, vix_above, nifty_drop_percent" },
           },
           required: ["mode"],
         },
@@ -83,9 +88,14 @@ const RUNNER_TOOLS: Anthropic.Tool[] = [
         condition: {
           type: "object",
           properties: {
-            mode: { type: "string", enum: ["code", "llm"] },
+            mode: { type: "string", enum: ["code", "llm", "event"] },
             expression: { type: "string" },
             description: { type: "string" },
+            kind: { type: "string", enum: ["position_opened", "position_closed", "news_mention", "sentiment_positive", "sentiment_negative", "pe_below", "pe_above", "fundamentals_changed", "vix_above", "vix_below", "nifty_drop_percent", "nifty_rise_percent"] },
+            symbols: { type: "array", items: { type: "string" } },
+            categories: { type: "array", items: { type: "string" } },
+            symbol: { type: "string" },
+            threshold: { type: "number" },
           },
           required: ["mode"],
         },

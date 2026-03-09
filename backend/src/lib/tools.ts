@@ -831,9 +831,23 @@ export function createRegisterTriggerTool(store: TriggerStore): ToolDefinition {
       name: "register_trigger",
       description: `Register a conditional market trigger. When the condition fires, it executes the action automatically.
 
-Two condition modes:
-- "code": A JavaScript expression evaluated against the snapshot. Use variables: quotes["SYMBOL"].lastPrice/changePercent/open/high/low, positions (array with .symbol/.quantity/.pnlPercent/.unrealizedPnl), funds.availableBalance, nifty50.lastPrice/changePercent, banknifty.lastPrice/changePercent. Expression must return exactly true to fire.
-- "llm": Natural language condition evaluated by an AI model each tick. Use for nuanced conditions.
+Condition modes:
+- "code": A JavaScript expression evaluated against the snapshot. Variables: quotes["SYMBOL"].lastPrice/changePercent/open/high/low, positions (array), funds.availableBalance, nifty50.lastPrice/changePercent, banknifty.lastPrice/changePercent. When event triggers are also active, the sandbox also exposes: events.newPositions, events.closedPositions, events.newHeadlines (Record<category, NewsItem[]>), fundamentals (Record<symbol, Fundamentals|null>), vix.lastPrice. Expression must return exactly true to fire.
+- "llm": Natural language condition evaluated by AI each tick. Use for qualitative/nuanced conditions.
+- "time": Fires once at a specific ISO timestamp (fireAt field).
+- "event": Typed, structured event condition. Pick a kind and fill in its parameters:
+  • kind "position_opened"     — fires when any of symbols[] enters the portfolio. params: symbols[]
+  • kind "position_closed"     — fires when any of symbols[] leaves the portfolio. params: symbols[]
+  • kind "news_mention"        — fires when any symbol in symbols[] appears in new headlines for categories[]. params: symbols[], categories[] (e.g. ["markets","companies"])
+  • kind "sentiment_positive"  — fires when Haiku judges new headlines for categories[] as positive for any symbol in symbols[]. params: symbols[], categories[]
+  • kind "sentiment_negative"  — fires when Haiku judges new headlines for categories[] as negative for any symbol in symbols[]. params: symbols[], categories[]
+  • kind "pe_below"            — fires when cached PE for symbol drops below threshold. params: symbol, threshold
+  • kind "pe_above"            — fires when cached PE for symbol rises above threshold (expensive, consider exit). params: symbol, threshold
+  • kind "fundamentals_changed"— fires when fresh fundamentals data arrives for symbol. params: symbol
+  • kind "vix_above"           — fires when India VIX spot price exceeds threshold. params: threshold
+  • kind "vix_below"           — fires when India VIX spot price drops below threshold (volatility calm, deploy capital). params: threshold
+  • kind "nifty_drop_percent"  — fires when Nifty50 intraday drop exceeds threshold (e.g. threshold: 1.5 means -1.5%). params: threshold
+  • kind "nifty_rise_percent"  — fires when Nifty50 intraday rally exceeds threshold (e.g. threshold: 1.5 means +1.5%). params: threshold
 
 Two action types:
 - "reasoning_job": Fires an autonomous Sonnet analysis loop that can queue trade proposals.
@@ -843,8 +857,12 @@ watchSymbols: List every symbol referenced in the condition so the snapshot buil
 
 Examples:
 - condition: { mode: "code", expression: "quotes['RELIANCE'].lastPrice < 2800" }
-- condition: { mode: "code", expression: "nifty50.changePercent < -1.5" }
-- condition: { mode: "llm", description: "Market sentiment looks bearish based on news and price action" }`,
+- condition: { mode: "code", expression: "vix?.lastPrice > 20 && nifty50.changePercent < -1.5" }
+- condition: { mode: "event", kind: "position_opened", symbols: ["RELIANCE"] }
+- condition: { mode: "event", kind: "pe_below", symbol: "TATASTEEL", threshold: 10 }
+- condition: { mode: "event", kind: "vix_above", threshold: 18 }
+- condition: { mode: "event", kind: "nifty_drop_percent", threshold: 1.5 }
+- condition: { mode: "event", kind: "news_mention", symbols: ["INFY"], categories: ["companies"] }`,
       input_schema: {
         type: "object",
         properties: {
@@ -859,10 +877,15 @@ Examples:
             type: "object",
             description: "Trigger condition",
             properties: {
-              mode: { type: "string", enum: ["code", "llm", "time"] },
+              mode: { type: "string", enum: ["code", "llm", "time", "event"] },
               expression: { type: "string", description: "JS expression (code mode)" },
               description: { type: "string", description: "Natural language condition (llm mode)" },
               fireAt: { type: "string", description: "ISO timestamp for time-mode triggers — fires once when Date.now() >= fireAt" },
+              kind: { type: "string", enum: ["position_opened", "position_closed", "news_mention", "sentiment_positive", "sentiment_negative", "pe_below", "pe_above", "fundamentals_changed", "vix_above", "vix_below", "nifty_drop_percent", "nifty_rise_percent"], description: "Event kind (event mode only)" },
+              symbols: { type: "array", items: { type: "string" }, description: "Symbols to watch (position/news/sentiment event kinds)" },
+              categories: { type: "array", items: { type: "string" }, description: "RSS categories to watch: markets, companies, economy, finance (news/sentiment event kinds)" },
+              symbol: { type: "string", description: "Single symbol for pe_below / fundamentals_changed event kinds" },
+              threshold: { type: "number", description: "Numeric threshold for pe_below, vix_above, nifty_drop_percent event kinds" },
             },
             required: ["mode"],
           },

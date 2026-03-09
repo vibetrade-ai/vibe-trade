@@ -57,6 +57,17 @@ export async function getEtfInfo(symbol: string): Promise<object> {
   };
 }
 
+export async function getVixQuote(): Promise<{ symbol: string; lastPrice: number } | null> {
+  try {
+    const quote = await yahooFinance.quote("^INDIAVIX");
+    const price = (quote as any)?.regularMarketPrice ?? (quote as any)?.price ?? null;
+    if (price == null) return null;
+    return { symbol: "^INDIAVIX", lastPrice: price as number };
+  } catch {
+    return null;
+  }
+}
+
 export async function getFundamentals(symbol: string): Promise<Fundamentals> {
   // NSE symbols use .NS suffix on Yahoo Finance
   const yahooSymbol = symbol.toUpperCase().endsWith(".NS")

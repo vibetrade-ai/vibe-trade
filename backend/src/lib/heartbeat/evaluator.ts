@@ -1,6 +1,6 @@
 import vm from "vm";
 import Anthropic from "@anthropic-ai/sdk";
-import type { Trigger, SystemSnapshot } from "./types.js";
+import type { Trigger, SystemSnapshot, EventDelta } from "./types.js";
 
 export function evaluateTimeTriggers(triggers: Trigger[]): string[] {
   const now = Date.now();
@@ -19,7 +19,7 @@ const anthropic = new Anthropic();
 
 const SAFE_QUOTE = { lastPrice: 0, previousClose: 0, changePercent: 0, open: 0, high: 0, low: 0, symbol: "", securityId: "" };
 
-export function evaluateCodeTriggers(snapshot: SystemSnapshot, triggers: Trigger[]): string[] {
+export function evaluateCodeTriggers(snapshot: SystemSnapshot, triggers: Trigger[], delta?: EventDelta): string[] {
   const fired: string[] = [];
 
   // Wrap quotes in a Proxy so missing symbols return a zero-value object instead of undefined.
@@ -42,6 +42,10 @@ export function evaluateCodeTriggers(snapshot: SystemSnapshot, triggers: Trigger
           funds: snapshot.funds,
           nifty50: snapshot.nifty50,
           banknifty: snapshot.banknifty,
+          // Enriched event context — available when event triggers are also active
+          events: delta ? { newPositions: delta.newPositions, closedPositions: delta.closedPositions, newHeadlines: delta.newHeadlines } : undefined,
+          fundamentals: delta?.fundamentals,
+          vix: delta?.vixQuote,
         },
         { timeout: 500 }
       );

@@ -10,11 +10,10 @@ import {
   searchInstruments,
   getIndexConstituents,
   getIndexConstituentInfo,
-  getIndexSecurityId,
   isEtf,
 } from "./dhan/instruments.js";
+import { fetchCandles, resolveInstrument } from "./dhan/candles.js";
 import { computeIndicators } from "./indicators.js";
-import type { Candle } from "./indicators.js";
 import { getFundamentals, getEtfInfo } from "./yahoo.js";
 import { fetchNews } from "./news.js";
 import { getMarketStatus, isTradingDay, getUpcomingHolidays } from "./market-calendar.js";
@@ -41,66 +40,6 @@ export function getApprovalDescription(tool: string, args: Record<string, unknow
   return describeApproval(tool, args);
 }
 
-// Helper: parse Dhan chart response into Candle[]
-function parseDhanCandles(data: unknown): Candle[] {
-  const d = data as Record<string, unknown>;
-  const timestamps = (d["timestamp"] as number[]) ?? [];
-  const opens = (d["open"] as number[]) ?? [];
-  const highs = (d["high"] as number[]) ?? [];
-  const lows = (d["low"] as number[]) ?? [];
-  const closes = (d["close"] as number[]) ?? [];
-  const volumes = (d["volume"] as number[]) ?? [];
-
-  return timestamps.map((ts, i) => ({
-    timestamp: ts,
-    open: opens[i] ?? 0,
-    high: highs[i] ?? 0,
-    low: lows[i] ?? 0,
-    close: closes[i] ?? 0,
-    volume: volumes[i] ?? 0,
-  }));
-}
-
-// Helper: compute date range strings
-function dateRange(days: number): { fromDate: string; toDate: string } {
-  const to = new Date();
-  const from = new Date();
-  from.setDate(from.getDate() - days);
-  const fmt = (d: Date) => d.toISOString().split("T")[0];
-  return { fromDate: fmt(from), toDate: fmt(to) };
-}
-
-// Fallback security IDs for well-known indices (in case IDX_I not in instrument master)
-const FALLBACK_INDEX_IDS: Record<string, string> = {
-  NIFTY50:   "13",
-  BANKNIFTY: "25",
-  FINNIFTY:  "27",
-};
-
-// Resolve a symbol to its security ID, exchange segment, and instrument type.
-// Checks the Dhan IDX_I map first (covers all indices in the instrument master),
-// then falls back to hardcoded IDs for the 3 major indices, then treats as equity.
-async function resolveInstrument(symbol: string): Promise<{
-  securityId: string;
-  exchangeSegment: "NSE_EQ" | "IDX_I";
-  instrument: "EQUITY" | "INDEX";
-}> {
-  let normalized = symbol.toUpperCase().replace(/[\s\-_]/g, "");
-  if (normalized === "NIFTYBANK") normalized = "BANKNIFTY";
-  if (normalized === "NIFTY") normalized = "NIFTY50";
-
-  // Try Dhan instrument master IDX_I entries first (dynamic — covers all indices)
-  let securityId = await getIndexSecurityId(normalized);
-  // Fallback for well-known indices in case IDX_I rows weren't parsed
-  if (!securityId) securityId = FALLBACK_INDEX_IDS[normalized];
-
-  if (securityId) {
-    return { securityId, exchangeSegment: "IDX_I", instrument: "INDEX" };
-  }
-
-  const equityId = await getSecurityId(symbol);
-  return { securityId: equityId, exchangeSegment: "NSE_EQ", instrument: "EQUITY" };
-}
 
 export const TOOLS: Record<string, ToolDefinition> = {
   get_quote: {
@@ -365,11 +304,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
       const symbol = args.symbol as string;
       const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
       const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
-      const { securityId, exchangeSegment, instrument } = await resolveInstrument(symbol);
-      const { fromDate, toDate } = dateRange(days);
-      const raw = await client.getHistory(securityId, interval, fromDate, toDate, exchangeSegment, instrument);
-      const candles = parseDhanCandles(raw);
-      // Return last 200 candles max
+      const candles = await fetchCandles(symbol, interval, days, client);
       return JSON.stringify(candles.slice(-200), null, 2);
     },
   },
@@ -404,10 +339,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
       const symbol = args.symbol as string;
       const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
       const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
-      const { securityId, exchangeSegment, instrument } = await resolveInstrument(symbol);
-      const { fromDate, toDate } = dateRange(days);
-      const raw = await client.getHistory(securityId, interval, fromDate, toDate, exchangeSegment, instrument);
-      const candles = parseDhanCandles(raw);
+      const candles = await fetchCandles(symbol, interval, days, client);
       if (candles.length < 26) {
         return JSON.stringify({ error: "Insufficient data for indicators. Try more days or a broader interval." });
       }
@@ -618,18 +550,25 @@ export const TOOLS: Record<string, ToolDefinition> = {
       const index = (args.index as string) ?? "NIFTY50";
       const securityIds = await getIndexConstituents(index);
 
-      // Fetch quotes in batches of 25
+      // Fetch quotes in batches of 25, up to 5 batches concurrently
       const batchSize = 25;
-      const allData: unknown[] = [];
-
+      const BATCH_CONCURRENCY = 5;
+      const batches: string[][] = [];
       for (let i = 0; i < securityIds.length; i += batchSize) {
-        const batch = securityIds.slice(i, i + batchSize);
-        const result = await client.getQuote(batch);
-        // New format: result.data["NSE_EQ"] is an object keyed by securityId string
-        const nseEq = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.["NSE_EQ"] as Record<string, Record<string, unknown>> | undefined;
-        if (nseEq && typeof nseEq === "object") {
-          for (const [secId, q] of Object.entries(nseEq)) {
-            allData.push({ ...q, securityId: secId });
+        batches.push(securityIds.slice(i, i + batchSize));
+      }
+
+      const allData: unknown[] = [];
+      for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
+        const chunk = batches.slice(i, i + BATCH_CONCURRENCY);
+        const results = await Promise.all(chunk.map(b => client.getQuote(b).catch(() => null)));
+        for (const result of results) {
+          if (!result) continue;
+          const nseEq = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.["NSE_EQ"] as Record<string, Record<string, unknown>> | undefined;
+          if (nseEq && typeof nseEq === "object") {
+            for (const [secId, q] of Object.entries(nseEq)) {
+              allData.push({ ...q, securityId: secId });
+            }
           }
         }
       }

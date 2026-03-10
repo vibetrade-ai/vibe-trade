@@ -278,3 +278,5 @@ Modified files: `heartbeat/types.ts`, `heartbeat/evaluator.ts`, `heartbeat/servi
 - **Reliability**: `updateLastRun` before job launch means no double-fire on restart. Missed windows are skipped (stale guard) rather than replayed with stale market context.
 - **Correctness**: code triggers no longer throw or misfire during closed market or partial quote failure.
 - **Scaling**: `schedules.json` is appropriate for single-user localhost. BullMQ with Redis is the natural upgrade for hosted multi-user deployment — the `runner.ts` boundary makes this a one-file swap.
+
+> **Amendment — ADR-010:** `runner.ts` was significantly revised after a 44-minute timeout incident. See [ADR-010](./010-scheduler-runner-performance.md) for details on the candle cache, history compaction, parallel tool dispatch, wall-clock timeout, and `max_tokens` reduction.

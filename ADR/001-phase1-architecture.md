@@ -36,8 +36,10 @@ Tools that mutate state (`place_order`, `cancel_order`) require user approval be
 ### Claude tool use for broker interaction
 Claude calls predefined tools. Backend runs the multi-turn tool use loop over a single WS session.
 
-### 24h access token via environment variables
-Dhan credentials stored in backend `.env`. No OAuth flow in Phase 1.
+### 24h access token via environment variables *(superseded)*
+~~Dhan credentials stored in backend `.env`. No OAuth flow in Phase 1.~~
+
+**Superseded by Phase 9 (credentials settings UI):** Credentials (`ANTHROPIC_API_KEY`, `DHAN_ACCESS_TOKEN`, `DHAN_CLIENT_ID`) are now stored in `backend/data/credentials.json` and managed via a Settings tab in the UI. A first-boot modal prompts for credentials when none are configured. The `CredentialsStore` singleton hot-swaps the `DhanClient` and `Anthropic` instances on update — no restart required. `.env` values are still read at startup as a migration fallback but `credentials.json` takes precedence. No secrets are ever returned to the frontend; `GET /api/settings` returns boolean flags only.
 
 ### Dhan via REST API (not Python SDK)
 The `dhanhq` SDK is Python. TypeScript calls the Dhan REST API directly with `fetch`.
@@ -77,5 +79,5 @@ When a Dhan API call fails, the error is returned as the tool result so Claude c
 ## Consequences
 - Simple architecture, easy to reason about
 - No auth complexity in Phase 1
-- Token must be refreshed manually every 24h
+- Token must be refreshed manually every 24h (updated via Settings UI as of Phase 9)
 - Future phases: programmatic token refresh, multi-broker support, tiered model routing

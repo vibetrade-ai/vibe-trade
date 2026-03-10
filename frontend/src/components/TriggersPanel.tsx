@@ -76,7 +76,7 @@ function formatTs(iso: string) {
 
 function ScopeBadge({ scope }: { scope: string }) {
   return (
-    <span className="px-1.5 py-0.5 rounded text-xs bg-blue-900/40 text-blue-300 border border-blue-800/40 font-mono">
+    <span className="px-1.5 py-0.5 rounded text-xs bg-[#4DFF4D]/10 text-[#4DFF4D] border border-[#4DFF4D]/30 font-mono">
       {scope}
     </span>
   );
@@ -200,8 +200,8 @@ function outcomeConfig(outcome: TriggerAuditEntry["outcome"]) {
         label: outcome.approvalId
           ? `Queued — approval ${outcome.approvalId.slice(0, 8)}…`
           : "Reasoning queued",
-        className: "text-blue-400",
-        dot: "bg-blue-400",
+        className: "text-[#4DFF4D]",
+        dot: "bg-[#4DFF4D]",
       };
     case "reasoning_job_no_action":
       return {
@@ -322,7 +322,7 @@ export function TriggersPanel() {
             onClick={() => setSubTab(tab)}
             className={`px-4 py-2.5 text-sm font-medium transition-colors capitalize ${
               subTab === tab
-                ? "border-b-2 border-blue-500 text-white -mb-px"
+                ? "border-b-2 border-[#4DFF4D] text-white -mb-px"
                 : "text-gray-400 hover:text-gray-300"
             }`}
           >

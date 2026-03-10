@@ -34,7 +34,7 @@ function formatAllocation(n: number) {
 // ── State badge ────────────────────────────────────────────────────────────────
 
 const STATE_COLORS: Record<StrategyState, string> = {
-  scanning: "bg-blue-900/40 text-blue-300 border-blue-800/40",
+  scanning: "bg-[#4DFF4D]/10 text-[#4DFF4D] border-[#4DFF4D]/30",
   accumulating: "bg-green-900/40 text-green-300 border-green-800/40",
   holding: "bg-amber-900/40 text-amber-300 border-amber-800/40",
   exiting: "bg-red-900/40 text-red-300 border-red-800/40",
@@ -158,7 +158,7 @@ function StrategyCard({ strategy, onRefresh, onViewPerformance }: { strategy: St
         <div className="flex items-center gap-2">
           <button
             onClick={() => onViewPerformance(strategy.id)}
-            className="px-3 py-1.5 rounded-lg bg-blue-900/30 text-blue-400 border border-blue-800/40 text-xs font-medium hover:bg-blue-900/50 hover:text-blue-300 transition-colors"
+            className="px-3 py-1.5 rounded-lg bg-[#4DFF4D]/10 text-[#4DFF4D] border border-[#4DFF4D]/30 text-xs font-medium hover:bg-[#4DFF4D]/20 transition-colors"
           >
             Performance
           </button>

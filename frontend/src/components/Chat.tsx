@@ -394,8 +394,8 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-3">
         {items.length === 0 && (
           <div className="text-center text-gray-500 text-sm mt-20">
-            <div className="text-3xl mb-4">📈</div>
-            <p className="font-medium text-gray-400 text-base mb-1">VibeTrade is ready</p>
+            <img src="/empty-state.png" alt="VibeTrade is ready" className="w-96 h-auto mx-auto mb-4 opacity-90" />
+            <p className="font-semibold text-gray-300 text-4xl mb-1">What's the play?</p>
             <p className="text-gray-600">Ask about market prices, your positions, or place trades.</p>
           </div>
         )}
@@ -462,7 +462,7 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
           if (item.role === "user") {
             return (
               <div key={item.id} className="flex justify-end">
-                <div className="max-w-[75%] bg-blue-600 text-white rounded-2xl rounded-br-sm px-4 py-2.5 text-sm leading-relaxed">
+                <div className="max-w-[75%] bg-[#4DFF4D] text-gray-900 rounded-2xl rounded-br-sm px-4 py-2.5 text-sm leading-relaxed">
                   {item.content}
                 </div>
               </div>
@@ -525,7 +525,7 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
             placeholder={connected ? "Message VibeTrade... (type @ to mention a strategy)" : "Connecting to backend..."}
             disabled={isDisabled}
             rows={1}
-            className="flex-1 resize-none rounded-xl bg-gray-800 border border-gray-700 text-gray-100 placeholder-gray-500 px-4 py-3 text-sm focus:outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed leading-relaxed"
+            className="flex-1 resize-none rounded-xl bg-gray-800 border border-gray-700 text-gray-100 placeholder-gray-500 px-4 py-3 text-sm focus:outline-none focus:border-[#4DFF4D]/60 focus:ring-1 focus:ring-[#4DFF4D]/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed leading-relaxed"
             style={{ minHeight: "48px", maxHeight: "160px" }}
             onInput={(e) => {
               const el = e.currentTarget;
@@ -536,10 +536,10 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
           <button
             onClick={sendMessage}
             disabled={isDisabled || !input.trim()}
-            className="rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-95 disabled:bg-gray-800 disabled:text-gray-600 disabled:cursor-not-allowed text-white w-11 h-11 flex items-center justify-center transition-all flex-shrink-0"
+            className="rounded-xl bg-[#4DFF4D] hover:bg-[#6fff6f] active:scale-95 disabled:bg-gray-800 disabled:text-gray-600 disabled:cursor-not-allowed text-gray-900 w-11 h-11 flex items-center justify-center transition-all flex-shrink-0"
             title="Send (Enter)"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 rotate-90">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 -rotate-45">
               <path d="M3.105 2.289a.75.75 0 00-.826.95l1.414 4.925A1.5 1.5 0 005.135 9.25h6.115a.75.75 0 010 1.5H5.135a1.5 1.5 0 00-1.442 1.086l-1.414 4.926a.75.75 0 00.826.95 28.896 28.896 0 0015.293-7.154.75.75 0 000-1.115A28.897 28.897 0 003.105 2.289z" />
             </svg>
           </button>

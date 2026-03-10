@@ -68,7 +68,7 @@ function CredentialRow({
         {!editing && (
           <button
             onClick={() => setEditing(true)}
-            className="ml-4 text-xs text-blue-400 hover:text-blue-300 flex-shrink-0"
+            className="ml-4 text-xs text-[#4DFF4D] hover:text-[#6fff6f] flex-shrink-0"
           >
             {configured ? "Update" : "Set"}
           </button>
@@ -83,12 +83,12 @@ function CredentialRow({
             onChange={(e) => setValue(e.target.value)}
             placeholder="Enter new value"
             autoFocus
-            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-[#4DFF4D]"
           />
           <button
             onClick={handleSave}
             disabled={saving || !value.trim()}
-            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-medium transition-colors"
+            className="px-3 py-1.5 rounded-lg bg-[#4DFF4D] hover:bg-[#6fff6f] disabled:opacity-50 text-gray-900 text-xs font-medium transition-colors"
           >
             {saving ? "..." : "Save"}
           </button>

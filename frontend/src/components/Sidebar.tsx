@@ -87,7 +87,7 @@ export function Sidebar({ conversationId, onSwitch, onNew, refreshKey }: Sidebar
                 <span className="text-xs font-medium truncate leading-snug">
                   {conv.title}
                 </span>
-                <span className="text-[10px] text-gray-600">
+                <span className="text-[12px] font-semibold text-gray-600">
                   {formatDate(conv.updatedAt)}
                 </span>
               </button>
@@ -95,6 +95,11 @@ export function Sidebar({ conversationId, onSwitch, onNew, refreshKey }: Sidebar
           })
         )}
       </nav>
+
+      {/* Bottom avatar */}
+      <div className="flex-shrink-0 px-3 py-3 border-t border-gray-800">
+        <img src="/logo-icon.png" alt="VibeTrade" className="w-8 h-8 rounded-full object-cover" />
+      </div>
     </aside>
   );
 }

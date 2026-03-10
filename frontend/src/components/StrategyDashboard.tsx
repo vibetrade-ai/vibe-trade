@@ -95,7 +95,7 @@ function AllocationBar({ deployed, allocation }: { deployed: number; allocation:
       </div>
       <div className="h-1.5 rounded-full bg-gray-700 overflow-hidden">
         <div
-          className="h-full rounded-full bg-blue-500 transition-all"
+          className="h-full rounded-full bg-[#4DFF4D] transition-all"
           style={{ width: `${pct}%` }}
         />
       </div>

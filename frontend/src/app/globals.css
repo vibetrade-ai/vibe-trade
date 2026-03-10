@@ -1,1 +1,10 @@
 @import "tailwindcss";
+
+* {
+  font-family: var(--font-dm-sans), sans-serif;
+}
+
+body {
+  font-size: 14px;
+  font-weight: 500;
+}

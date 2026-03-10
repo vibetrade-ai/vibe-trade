@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Chat } from "./Chat";
 import { Sidebar } from "./Sidebar";
 import { ConnectionBadge } from "./ConnectionBadge";
@@ -12,6 +12,7 @@ import { SettingsModal } from "./SettingsModal";
 import { SettingsPanel } from "./SettingsPanel";
 import { useApprovals } from "../hooks/useApprovals";
 import { useSettings } from "../hooks/useSettings";
+import { ChatsCircle, CheckCircle, Lightning, CalendarBlank, GameController, GearSix } from "@phosphor-icons/react";
 
 type Tab = "chat" | "approvals" | "triggers" | "schedules" | "strategies" | "settings";
 
@@ -65,13 +66,13 @@ export function ChatLayout() {
     setSidebarRefreshKey((k) => k + 1);
   }, []);
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "chat", label: "Chat" },
-    { id: "approvals", label: "Approvals" },
-    { id: "triggers", label: "Triggers" },
-    { id: "schedules", label: "Schedules" },
-    { id: "strategies", label: "Strategies" },
-    { id: "settings", label: "Settings" },
+  const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
+    { id: "chat", label: "Chat", icon: <ChatsCircle weight="bold" size={16} /> },
+    { id: "approvals", label: "Approvals", icon: <CheckCircle weight="bold" size={16} /> },
+    { id: "triggers", label: "Triggers", icon: <Lightning weight="bold" size={16} /> },
+    { id: "schedules", label: "Schedules", icon: <CalendarBlank weight="bold" size={16} /> },
+    { id: "strategies", label: "Strategies", icon: <GameController weight="bold" size={16} /> },
+    { id: "settings", label: "Settings", icon: <GearSix weight="bold" size={16} /> },
   ];
 
   return (
@@ -95,8 +96,9 @@ export function ChatLayout() {
         {/* Header */}
         <header className="flex items-center justify-between px-6 py-4 border-b border-gray-800 flex-shrink-0">
           <div className="flex items-center gap-3">
-            <span className="text-xl font-bold text-white tracking-tight">VibeTrade</span>
-            <span className="text-xs text-gray-500 hidden sm:block">AI-powered broker</span>
+            <img src="/logo-icon.png" alt="VibeTrade" className="h-8 w-8 rounded-full object-cover flex-shrink-0" />
+            <img src="/logo-text.png" alt="VibeTrade" className="h-7 object-contain hidden sm:block" />
+            <span className="text-xs text-gray-500 hidden sm:block">Your AI Broker</span>
           </div>
           <ConnectionBadge refreshKey={connectionRefreshKey} />
         </header>
@@ -107,12 +109,13 @@ export function ChatLayout() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center px-4 py-3 text-sm font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium transition-colors ${
                 activeTab === tab.id
-                  ? "border-b-2 border-blue-500 text-white -mb-px"
+                  ? "border-b-2 border-[#4DFF4D] text-white -mb-px"
                   : "text-gray-400 hover:text-gray-300"
               }`}
             >
+              {tab.icon}
               {tab.label}
               {tab.id === "approvals" && <PendingBadge count={pendingCount} />}
             </button>

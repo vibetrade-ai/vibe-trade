@@ -215,7 +215,7 @@ export function ApprovalItem({ approval, onDecide }: ApprovalItemProps) {
       )}
 
       {/* Reasoning */}
-      <Reasoning text={approval.reasoning} />
+      {approval.reasoning && <Reasoning text={approval.reasoning} />}
 
       {/* Action buttons or status */}
       {isPending ? (

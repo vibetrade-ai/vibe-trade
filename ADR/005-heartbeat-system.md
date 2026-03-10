@@ -129,13 +129,28 @@ No Dhan API calls, no Haiku calls, no work done.
 
 **Rationale:** The most common state is no triggers. Making the idle case truly free avoids unnecessary API load on Dhan's servers and keeps the heartbeat from failing silently when no credentials are needed.
 
-### 8. Reasoning jobs are fire-and-forget, capped at 3 concurrent
+### 8. Triggers carry optional inline context for reasoning jobs
+
+```typescript
+interface Trigger {
+  // ...
+  context?: string;  // optional goal/instruction injected into reasoning job prompt
+}
+```
+
+When a reasoning job fires, if `trigger.context` is set it is injected as a `<trigger_context>` block in the system prompt — after the `<strategy>` block if one is present. This lets one-off triggers carry their own intent without requiring a full strategy entity, and lets strategy-linked triggers add specifics beyond the strategy plan.
+
+`register_trigger` and the runner's `register_soft_trigger` tool both accept `context`. Child soft triggers created by a reasoning job inherit `strategyId` from their parent and can optionally carry forward a `context` of their own.
+
+**Rationale:** Without `context`, triggers that fire without a strategy link have no goal — the reasoning job sees only raw market data and must infer intent from the trigger name and condition. `context` is a lightweight escape hatch: a free-text field where Claude or the user can express exactly what the job should decide and why, without the overhead of creating a strategy entity.
+
+### 9. Reasoning jobs are fire-and-forget, capped at 3 concurrent (was §8)
 
 Reasoning jobs run in the background. The service does not await their completion — it starts the job and moves on. A counter caps concurrency at 3 to prevent runaway Sonnet usage if many triggers fire simultaneously.
 
 **Rationale:** A tick that awaits reasoning jobs would block the next tick. Fire-and-forget allows the heartbeat to remain on schedule. The 3-job cap is a safety bound — in practice, most ticks fire 0 or 1 triggers.
 
-### 9. Approval queue is shared between chat-path and reasoning-job-path approvals
+### 10. Approval queue is shared between chat-path and reasoning-job-path approvals
 
 Both paths write to the same `ApprovalStore`. The frontend polls `GET /api/approvals` every 10 seconds and displays all pending items regardless of origin.
 

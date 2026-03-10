@@ -852,6 +852,7 @@ Examples:
           },
           expiresAt: { type: "string", description: "ISO date string — trigger auto-expires if condition never fires by this time" },
           strategy_id: { type: "string", description: "Optional strategy ID to link this trigger to a strategy" },
+          context: { type: "string", description: "Optional inline context/goal for the reasoning job — describe what you want it to do and why. Always set this for one-off triggers without a strategy, and use it to add specifics even when a strategy is linked." },
         },
         required: ["name", "scope", "watchSymbols", "condition", "action"],
       },
@@ -871,6 +872,7 @@ Examples:
         active: true,
         status: "active" as const,
         ...(args.strategy_id ? { strategyId: args.strategy_id as string } : {}),
+        ...(args.context ? { context: args.context as string } : {}),
       };
       await store.upsert(trigger);
       return JSON.stringify({ success: true, triggerId: trigger.id, name: trigger.name });

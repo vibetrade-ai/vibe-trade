@@ -62,6 +62,8 @@ export interface Trigger {
   firedAt?: string;
   outcomeId?: string;
   strategyId?: string;
+  /** Optional inline context/goal injected into the reasoning job prompt */
+  context?: string;
 }
 
 export interface QuoteEntry {

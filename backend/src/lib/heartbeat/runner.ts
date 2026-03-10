@@ -55,6 +55,7 @@ const RUNNER_TOOLS: Anthropic.Tool[] = [
           required: ["mode"],
         },
         expiresAt: { type: "string", description: "ISO string expiry (optional)" },
+        context: { type: "string", description: "Optional context/goal to carry into the next reasoning job when this trigger fires" },
       },
       required: ["name", "scope", "watchSymbols", "condition"],
     },
@@ -171,6 +172,10 @@ ${triggersBlock}
 IMPORTANT: Before queuing any trade, confirm the required capital does not exceed the available balance shown above. If funds are insufficient, call no_action with a clear reason.
 </strategy>`;
     }
+  }
+
+  if (trigger.context) {
+    systemPrompt += `\n\n<trigger_context>\n${trigger.context}\n</trigger_context>`;
   }
 
   const allTools: Anthropic.Tool[] = [
@@ -291,6 +296,8 @@ Analyze the situation and take appropriate action.`;
           createdAt: new Date().toISOString(),
           active: true,
           status: "active",
+          ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+          ...(args.context ? { context: args.context as string } : {}),
         };
         await triggerStore.upsert(newTrigger);
         console.log(`[heartbeat] registered new soft trigger ${newTrigger.id}: ${newTrigger.name}`);

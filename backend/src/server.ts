@@ -1,7 +1,10 @@
 import "dotenv/config";
+import { existsSync } from "fs";
+import { resolve, join } from "path";
 import Fastify from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyCors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import { statusRoute } from "./routes/status.js";
 import { chatRoute } from "./routes/chat.js";
 import { conversationsRoute } from "./routes/conversations.js";
@@ -17,6 +20,11 @@ import { SchedulerService } from "./lib/scheduler/service.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 
+// Auto-detect CLI/standalone mode: if frontend/out/ exists next to the package root, serve it
+const projectRoot = resolve(__dirname, "../../");
+const staticDir = join(projectRoot, "frontend", "out");
+const serveStatic = existsSync(staticDir);
+
 const fastify = Fastify({ logger: { level: "info" } });
 
 async function start() {
@@ -25,7 +33,9 @@ async function start() {
   await credentialsStore.load();
 
   await fastify.register(fastifyCors, {
-    origin: process.env.FRONTEND_URL ?? "http://localhost:3000",
+    origin: serveStatic
+      ? true
+      : (process.env.FRONTEND_URL ?? "http://localhost:3000"),
     methods: ["GET", "POST", "DELETE"],
   });
 
@@ -50,6 +60,18 @@ async function start() {
   await fastify.register(strategiesRoute, { strategies: storage.strategies, triggers: storage.triggers, schedules: storage.schedules, trades: storage.trades });
 
   fastify.get("/health", async () => ({ ok: true }));
+
+  // CLI/standalone mode: serve the static frontend and add SPA fallback
+  if (serveStatic) {
+    console.log(`[static] Serving frontend from ${staticDir}`);
+    await fastify.register(fastifyStatic, { root: staticDir, prefix: "/", wildcard: false });
+    fastify.setNotFoundHandler(async (request, reply) => {
+      if (request.url.startsWith("/api/") || request.url.startsWith("/ws/")) {
+        return reply.status(404).send({ error: "Not found" });
+      }
+      return reply.sendFile("index.html");
+    });
+  }
 
   try {
     await fastify.listen({ port: PORT, host: "0.0.0.0" });

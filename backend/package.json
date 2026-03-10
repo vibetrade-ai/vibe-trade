@@ -10,6 +10,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
     "@fastify/cors": "^11.0.0",
+    "@fastify/static": "^9.0.0",
     "@fastify/websocket": "^11.0.0",
     "cron-parser": "^4.9.0",
     "csv-parse": "^5.5.6",

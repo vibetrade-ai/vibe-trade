@@ -1,0 +1,29 @@
+{
+  "name": "vibe-trade",
+  "version": "1.0.0",
+  "description": "AI-powered trading assistant for NSE (India) built on Claude",
+  "bin": {
+    "vibe-trade": "./cli.js"
+  },
+  "files": [
+    "cli.js",
+    "backend/dist/",
+    "backend/package.json",
+    "frontend/out/"
+  ],
+  "scripts": {
+    "build:backend": "cd backend && npm install && npm run build",
+    "build:frontend": "cd frontend && npm install && NEXT_STATIC_EXPORT=1 npm run build",
+    "build": "npm run build:backend && npm run build:frontend",
+    "start": "node cli.js",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev"
+  },
+  "dependencies": {
+    "open": "^10.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

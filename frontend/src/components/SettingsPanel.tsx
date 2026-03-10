@@ -2,8 +2,7 @@
 
 import { useState } from "react";
 import { useSettings } from "../hooks/useSettings";
-
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 const CREDENTIAL_FIELDS: { key: "ANTHROPIC_API_KEY" | "DHAN_ACCESS_TOKEN" | "DHAN_CLIENT_ID"; label: string; description: string }[] = [
   { key: "ANTHROPIC_API_KEY", label: "Anthropic API Key", description: "Used to call Claude models" },
@@ -106,20 +105,21 @@ function CredentialRow({
   );
 }
 
-export function SettingsPanel() {
+export function SettingsPanel({ onSaved }: { onSaved?: () => void } = {}) {
   const { status, allConfigured, loading, save } = useSettings();
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
 
   async function handleSaveField(key: string, value: string) {
     await save({ [key as keyof typeof status]: value });
+    onSaved?.();
   }
 
   async function handleTestConnection() {
     setTesting(true);
     setTestResult(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/health`);
+      const res = await fetch(`${getBackendHttpUrl()}/health`);
       if (res.ok) {
         setTestResult("Backend reachable");
       } else {

@@ -1,41 +1,37 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 type ConnectionStatus = "checking" | "connected" | "token_expired" | "error";
 
-export function ConnectionBadge() {
+export function ConnectionBadge({ refreshKey = 0 }: { refreshKey?: number }) {
   const [status, setStatus] = useState<ConnectionStatus>("checking");
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const url = process.env.NEXT_PUBLIC_BACKEND_HTTP_URL ?? "http://localhost:3001";
+    setStatus("checking");
+    const url = getBackendHttpUrl();
 
-    const check = () => {
-      fetch(`${url}/status`)
-        .then(async (res) => {
-          const data = await res.json() as { status: string; message?: string };
-          if (data.status === "connected") {
-            setStatus("connected");
-            setMessage("Dhan connected");
-          } else if (data.status === "token_expired") {
-            setStatus("token_expired");
-            setMessage("Token expired");
-          } else {
-            setStatus("error");
-            setMessage(data.message ?? "Connection error");
-          }
-        })
-        .catch(() => {
+    fetch(`${url}/status`)
+      .then(async (res) => {
+        const data = await res.json() as { status: string; message?: string };
+        if (data.status === "connected") {
+          setStatus("connected");
+          setMessage("Dhan connected");
+        } else if (data.status === "token_expired") {
+          setStatus("token_expired");
+          setMessage("Token expired");
+        } else {
           setStatus("error");
-          setMessage("Backend unreachable");
-        });
-    };
-
-    check();
-    window.addEventListener("credentials-updated", check);
-    return () => window.removeEventListener("credentials-updated", check);
-  }, []);
+          setMessage(data.message ?? "Connection error");
+        }
+      })
+      .catch(() => {
+        setStatus("error");
+        setMessage("Backend unreachable");
+      });
+  }, [refreshKey]);
 
   const config = {
     checking: { dot: "bg-gray-400 animate-pulse", text: "text-gray-400", label: "Checking..." },

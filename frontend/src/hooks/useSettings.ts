@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 interface CredentialStatus {
   ANTHROPIC_API_KEY: boolean;
@@ -25,7 +24,7 @@ export function useSettings() {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/settings`);
+      const res = await fetch(`${getBackendHttpUrl()}/api/settings`);
       if (!res.ok) return;
       const data = (await res.json()) as { status: CredentialStatus; allConfigured: boolean };
       setState({ loading: false, allConfigured: data.allConfigured, status: data.status });
@@ -36,7 +35,7 @@ export function useSettings() {
 
   const save = useCallback(
     async (patch: Partial<Record<keyof CredentialStatus, string>>) => {
-      const res = await fetch(`${BACKEND_URL}/api/settings`, {
+      const res = await fetch(`${getBackendHttpUrl()}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),

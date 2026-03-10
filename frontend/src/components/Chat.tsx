@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApprovalCard } from "./ApprovalCard";
+import { getBackendHttpUrl, getBackendWsUrl } from "@/lib/backend-url";
 
 type Role = "user" | "assistant" | "system";
 
@@ -109,8 +110,6 @@ interface Strategy {
   name: string;
 }
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
-
 export function Chat({ conversationId, onTurnComplete }: ChatProps) {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
@@ -135,7 +134,7 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
       return strategyCacheRef.current;
     }
     try {
-      const res = await fetch(`${BACKEND_URL}/api/strategies`);
+      const res = await fetch(`${getBackendHttpUrl()}/api/strategies`);
       if (!res.ok) return strategyCacheRef.current;
       const data = (await res.json()) as Strategy[];
       strategyCacheRef.current = data;
@@ -154,8 +153,7 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
     setTokenExpired(false);
     currentAssistantIdRef.current = null;
 
-    const httpUrl = process.env.NEXT_PUBLIC_BACKEND_HTTP_URL ?? "http://localhost:3001";
-    fetch(`${httpUrl}/api/conversations/${conversationId}/messages`)
+    fetch(`${getBackendHttpUrl()}/api/conversations/${conversationId}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then((msgs: Array<{ role: string; text: string; toolName?: string }>) => {
         setItems(
@@ -189,8 +187,7 @@ export function Chat({ conversationId, onTurnComplete }: ChatProps) {
   // Open/reopen WebSocket whenever conversationId changes
   useEffect(() => {
     if (!conversationId) return;
-    const wsUrl = process.env.NEXT_PUBLIC_BACKEND_WS_URL ?? "ws://localhost:3001";
-    const ws = new WebSocket(`${wsUrl}/ws/chat?conversationId=${conversationId}`);
+    const ws = new WebSocket(`${getBackendWsUrl()}/ws/chat?conversationId=${conversationId}`);
     wsRef.current = ws;
 
     ws.onopen = () => setConnected(true);

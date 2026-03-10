@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,6 @@ interface ScheduleRun {
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
 const POLL_INTERVAL_MS = 30_000;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ function ScheduleCard({ schedule, strategyName, onRefresh }: { schedule: Schedul
   const handlePause = async () => {
     setLoading(true);
     try {
-      await fetch(`${BACKEND_URL}/api/schedules/${schedule.id}/pause`, { method: "POST" });
+      await fetch(`${getBackendHttpUrl()}/api/schedules/${schedule.id}/pause`, { method: "POST" });
       onRefresh();
     } catch {
       // ignore
@@ -116,7 +116,7 @@ function ScheduleCard({ schedule, strategyName, onRefresh }: { schedule: Schedul
   const handleResume = async () => {
     setLoading(true);
     try {
-      await fetch(`${BACKEND_URL}/api/schedules/${schedule.id}/resume`, { method: "POST" });
+      await fetch(`${getBackendHttpUrl()}/api/schedules/${schedule.id}/resume`, { method: "POST" });
       onRefresh();
     } catch {
       // ignore
@@ -129,7 +129,7 @@ function ScheduleCard({ schedule, strategyName, onRefresh }: { schedule: Schedul
     if (!confirm(`Delete schedule "${schedule.name}"?`)) return;
     setLoading(true);
     try {
-      await fetch(`${BACKEND_URL}/api/schedules/${schedule.id}`, { method: "DELETE" });
+      await fetch(`${getBackendHttpUrl()}/api/schedules/${schedule.id}`, { method: "DELETE" });
       onRefresh();
     } catch {
       // ignore
@@ -272,8 +272,8 @@ export function SchedulesPanel() {
   const fetchSchedules = useCallback(async () => {
     try {
       const [schedulesRes, strategiesRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/api/schedules`),
-        fetch(`${BACKEND_URL}/api/strategies`),
+        fetch(`${getBackendHttpUrl()}/api/schedules`),
+        fetch(`${getBackendHttpUrl()}/api/strategies`),
       ]);
       if (schedulesRes.ok) setSchedules((await schedulesRes.json()) as Schedule[]);
       if (strategiesRes.ok) {
@@ -289,7 +289,7 @@ export function SchedulesPanel() {
 
   const fetchRuns = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/schedules/runs`);
+      const res = await fetch(`${getBackendHttpUrl()}/api/schedules/runs`);
       if (!res.ok) return;
       setRuns((await res.json()) as ScheduleRun[]);
     } catch {

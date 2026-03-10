@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -56,7 +57,6 @@ interface TriggerAuditEntry {
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
 const POLL_INTERVAL_MS = 30_000;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -272,8 +272,8 @@ export function TriggersPanel() {
   const fetchTriggers = useCallback(async () => {
     try {
       const [triggersRes, strategiesRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/api/triggers`),
-        fetch(`${BACKEND_URL}/api/strategies`),
+        fetch(`${getBackendHttpUrl()}/api/triggers`),
+        fetch(`${getBackendHttpUrl()}/api/strategies`),
       ]);
       if (triggersRes.ok) setTriggers((await triggersRes.json()) as Trigger[]);
       if (strategiesRes.ok) {
@@ -289,7 +289,7 @@ export function TriggersPanel() {
 
   const fetchAudit = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/triggers/audit`);
+      const res = await fetch(`${getBackendHttpUrl()}/api/triggers/audit`);
       if (!res.ok) return;
       const data = (await res.json()) as TriggerAuditEntry[];
       setAudit(data);

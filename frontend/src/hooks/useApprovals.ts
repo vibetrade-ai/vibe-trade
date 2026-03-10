@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -58,7 +59,6 @@ export type PendingApproval =
 
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
 const POLL_INTERVAL_MS = 10_000;
 
 export function useApprovals() {
@@ -68,7 +68,7 @@ export function useApprovals() {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/approvals`);
+      const res = await fetch(`${getBackendHttpUrl()}/api/approvals`);
       if (!res.ok) return;
       const data = (await res.json()) as PendingApproval[];
       setApprovals(data);
@@ -82,7 +82,7 @@ export function useApprovals() {
   const decide = useCallback(
     async (id: string, decision: "approved" | "rejected") => {
       try {
-        await fetch(`${BACKEND_URL}/api/approvals/${id}/decide`, {
+        await fetch(`${getBackendHttpUrl()}/api/approvals/${id}/decide`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ decision }),

@@ -32,6 +32,7 @@ export function ChatLayout() {
   const { pendingCount } = useApprovals();
   const { loading: settingsLoading, allConfigured } = useSettings();
   const [showSetupModal, setShowSetupModal] = useState(false);
+  const [connectionRefreshKey, setConnectionRefreshKey] = useState(0);
 
   useEffect(() => {
     if (!settingsLoading && !allConfigured) setShowSetupModal(true);
@@ -77,7 +78,7 @@ export function ChatLayout() {
     <>
     {showSetupModal && (
       <SettingsModal
-        onSaved={() => setShowSetupModal(false)}
+        onSaved={() => { setShowSetupModal(false); setConnectionRefreshKey(k => k + 1); }}
         onSkip={() => setShowSetupModal(false)}
       />
     )}
@@ -97,7 +98,7 @@ export function ChatLayout() {
             <span className="text-xl font-bold text-white tracking-tight">VibeTrade</span>
             <span className="text-xs text-gray-500 hidden sm:block">AI-powered broker</span>
           </div>
-          <ConnectionBadge />
+          <ConnectionBadge refreshKey={connectionRefreshKey} />
         </header>
 
         {/* Tab bar */}
@@ -156,7 +157,7 @@ export function ChatLayout() {
           {/* Settings panel */}
           {activeTab === "settings" && (
             <div className="flex-1 overflow-hidden flex flex-col">
-              <SettingsPanel />
+              <SettingsPanel onSaved={() => setConnectionRefreshKey(k => k + 1)} />
             </div>
           )}
         </main>

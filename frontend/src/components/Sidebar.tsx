@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 interface ConversationMeta {
   id: string;
@@ -36,7 +37,7 @@ export function Sidebar({ conversationId, onSwitch, onNew, refreshKey }: Sidebar
 
   const fetchList = useCallback(async () => {
     try {
-      const url = process.env.NEXT_PUBLIC_BACKEND_HTTP_URL ?? "http://localhost:3001";
+      const url = getBackendHttpUrl();
       const res = await fetch(`${url}/api/conversations`);
       if (res.ok) {
         setConversations(await res.json() as ConversationMeta[]);

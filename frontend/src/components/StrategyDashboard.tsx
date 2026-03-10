@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -146,8 +145,8 @@ export function StrategyDashboard({ strategyId, onBack }: { strategyId: string; 
     setLoading(true);
     try {
       const [perfRes, tradesRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/api/strategies/${strategyId}/performance`),
-        fetch(`${BACKEND_URL}/api/strategies/${strategyId}/trades`),
+        fetch(`${getBackendHttpUrl()}/api/strategies/${strategyId}/performance`),
+        fetch(`${getBackendHttpUrl()}/api/strategies/${strategyId}/trades`),
       ]);
       if (perfRes.ok) setPerf(await perfRes.json() as Performance);
       if (tradesRes.ok) setTrades(await tradesRes.json() as TradeRecord[]);
@@ -164,7 +163,7 @@ export function StrategyDashboard({ strategyId, onBack }: { strategyId: string; 
     setSyncing(true);
     setSyncResult(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/trades/sync`, { method: "POST" });
+      const res = await fetch(`${getBackendHttpUrl()}/api/trades/sync`, { method: "POST" });
       if (res.ok) {
         const data = await res.json() as { updated: number; tradebookEntries: number };
         setSyncResult(`Synced ${data.tradebookEntries} fills, updated ${data.updated} records`);

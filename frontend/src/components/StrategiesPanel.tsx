@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getBackendHttpUrl } from "@/lib/backend-url";
 import { StrategyDashboard } from "./StrategyDashboard";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -22,7 +23,6 @@ interface Strategy {
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001";
 const POLL_INTERVAL_MS = 30_000;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ function StrategyCard({ strategy, onRefresh, onViewPerformance }: { strategy: St
     setArchiving(true);
     setArchiveError(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/strategies/${strategy.id}`, { method: "DELETE" });
+      const res = await fetch(`${getBackendHttpUrl()}/api/strategies/${strategy.id}`, { method: "DELETE" });
       if (res.status === 409) {
         const body = await res.json() as { openPositions?: { symbol: string; quantity: number }[]; hint?: string };
         const positions = body.openPositions ?? [];
@@ -192,7 +192,7 @@ export function StrategiesPanel() {
 
   const fetchStrategies = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/strategies`);
+      const res = await fetch(`${getBackendHttpUrl()}/api/strategies`);
       if (!res.ok) return;
       setStrategies((await res.json()) as Strategy[]);
     } catch {

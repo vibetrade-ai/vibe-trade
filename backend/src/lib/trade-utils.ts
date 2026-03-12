@@ -13,24 +13,28 @@ export interface OpenPosition {
  * BUYs add qty, SELLs reduce qty. Only returns symbols with qty > 0.
  */
 export function computeOpenPositions(trades: TradeRecord[]): OpenPosition[] {
-  const netQty: Record<string, { quantity: number; totalCost: number; securityId: string }> = {};
+  const netQty: Record<string, { quantity: number; totalCost: number; totalProceeds: number; securityId: string }> = {};
   for (const t of trades) {
-    if (!netQty[t.symbol]) netQty[t.symbol] = { quantity: 0, totalCost: 0, securityId: t.securityId };
+    if (!netQty[t.symbol]) netQty[t.symbol] = { quantity: 0, totalCost: 0, totalProceeds: 0, securityId: t.securityId };
+    const price = t.executedPrice ?? t.requestedPrice ?? 0;
     if (t.transactionType === "BUY") {
       netQty[t.symbol].quantity += t.quantity;
-      netQty[t.symbol].totalCost += (t.executedPrice ?? t.requestedPrice ?? 0) * t.quantity;
+      netQty[t.symbol].totalCost += price * t.quantity;
     } else {
       netQty[t.symbol].quantity -= t.quantity;
+      netQty[t.symbol].totalProceeds += price * t.quantity;
     }
   }
   return Object.entries(netQty)
-    .filter(([, v]) => v.quantity > 0)
+    .filter(([, v]) => v.quantity !== 0)
     .map(([symbol, v]) => ({
       symbol,
       securityId: v.securityId,
       quantity: v.quantity,
-      avgBuyPrice: +(v.totalCost / v.quantity).toFixed(2),
-      deployedCapital: +v.totalCost.toFixed(2),
+      avgBuyPrice: v.quantity > 0 
+        ? +(v.totalCost / v.quantity).toFixed(2)
+        : +(v.totalProceeds / Math.abs(v.quantity)).toFixed(2),
+      deployedCapital: v.quantity > 0 ? +v.totalCost.toFixed(2) : +v.totalProceeds.toFixed(2),
     }));
 }
 

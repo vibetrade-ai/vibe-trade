@@ -1,30 +1,11 @@
-import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import type { ApprovalStore } from "../types.js";
 import type { PendingApproval, ApprovalStatus } from "../../heartbeat/types.js";
+import { JsonArrayStore } from "./base.js";
 
-export class LocalApprovalStore implements ApprovalStore {
-  private filePath: string;
-  private cache: PendingApproval[] | null = null;
-
+export class LocalApprovalStore extends JsonArrayStore<PendingApproval> implements ApprovalStore {
   constructor(dataDir: string) {
-    this.filePath = join(dataDir, "approvals.json");
-  }
-
-  private async load(): Promise<PendingApproval[]> {
-    if (this.cache) return this.cache;
-    try {
-      const content = await readFile(this.filePath, "utf-8");
-      this.cache = JSON.parse(content) as PendingApproval[];
-    } catch {
-      this.cache = [];
-    }
-    return this.cache;
-  }
-
-  private async save(approvals: PendingApproval[]): Promise<void> {
-    this.cache = approvals;
-    await writeFile(this.filePath, JSON.stringify(approvals, null, 2), "utf-8");
+    super(join(dataDir, "approvals.json"));
   }
 
   async list(filter?: { status?: ApprovalStatus }): Promise<PendingApproval[]> {

@@ -187,8 +187,13 @@ export async function strategiesRoute(
       return { error: "Dhan credentials not configured" };
     }
 
-    const raw = await dhan.getTradebook();
-    const tradebookEntries = Array.isArray(raw) ? (raw as unknown[]).length : 0;
+    let tradebookEntries = 0;
+    try {
+      const raw = await dhan.getTradebook();
+      tradebookEntries = Array.isArray(raw) ? (raw as unknown[]).length : 0;
+    } catch (err) {
+      console.error("[trades/sync] tradebook fetch failed:", err);
+    }
     const { fillsUpdated: updated } = await syncOrders(dhan, opts.trades);
     return { tradebookEntries, updated };
   });

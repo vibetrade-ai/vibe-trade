@@ -198,6 +198,6 @@ export class DhanClient {
   }
 
   async getTradebook(): Promise<unknown> {
-    return this.request("GET", "/tradebook");
+    return this.request("GET", "/trades");
   }
 }

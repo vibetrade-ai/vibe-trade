@@ -168,6 +168,9 @@ export function StrategyDashboard({ strategyId, onBack }: { strategyId: string; 
         const data = await res.json() as { updated: number; tradebookEntries: number };
         setSyncResult(`Synced ${data.tradebookEntries} fills, updated ${data.updated} records`);
         await load();
+      } else {
+        const err = await res.json().catch(() => ({})) as { message?: string };
+        setSyncResult(`Sync failed — ${err.message ?? res.statusText}`);
       }
     } catch {
       setSyncResult("Sync failed — check backend");

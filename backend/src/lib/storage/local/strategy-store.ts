@@ -1,29 +1,10 @@
-import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import type { StrategyStore, Strategy, StrategyStatus, StrategyState } from "../types.js";
+import { JsonArrayStore } from "./base.js";
 
-export class LocalStrategyStore implements StrategyStore {
-  private filePath: string;
-  private cache: Strategy[] | null = null;
-
+export class LocalStrategyStore extends JsonArrayStore<Strategy> implements StrategyStore {
   constructor(dataDir: string) {
-    this.filePath = join(dataDir, "strategies.json");
-  }
-
-  private async load(): Promise<Strategy[]> {
-    if (this.cache) return this.cache;
-    try {
-      const content = await readFile(this.filePath, "utf-8");
-      this.cache = JSON.parse(content) as Strategy[];
-    } catch {
-      this.cache = [];
-    }
-    return this.cache;
-  }
-
-  private async save(strategies: Strategy[]): Promise<void> {
-    this.cache = strategies;
-    await writeFile(this.filePath, JSON.stringify(strategies, null, 2), "utf-8");
+    super(join(dataDir, "strategies.json"));
   }
 
   async list(filter?: { status?: StrategyStatus }): Promise<Strategy[]> {

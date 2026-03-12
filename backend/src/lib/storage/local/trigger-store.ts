@@ -1,30 +1,11 @@
-import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import type { TriggerStore } from "../types.js";
 import type { Trigger, TriggerStatus } from "../../heartbeat/types.js";
+import { JsonArrayStore } from "./base.js";
 
-export class LocalTriggerStore implements TriggerStore {
-  private filePath: string;
-  private cache: Trigger[] | null = null;
-
+export class LocalTriggerStore extends JsonArrayStore<Trigger> implements TriggerStore {
   constructor(dataDir: string) {
-    this.filePath = join(dataDir, "triggers.json");
-  }
-
-  private async load(): Promise<Trigger[]> {
-    if (this.cache) return this.cache;
-    try {
-      const content = await readFile(this.filePath, "utf-8");
-      this.cache = JSON.parse(content) as Trigger[];
-    } catch {
-      this.cache = [];
-    }
-    return this.cache;
-  }
-
-  private async save(triggers: Trigger[]): Promise<void> {
-    this.cache = triggers;
-    await writeFile(this.filePath, JSON.stringify(triggers, null, 2), "utf-8");
+    super(join(dataDir, "triggers.json"));
   }
 
   async list(filter?: { status?: TriggerStatus }): Promise<Trigger[]> {

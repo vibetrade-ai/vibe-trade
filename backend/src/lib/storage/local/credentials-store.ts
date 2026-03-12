@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "fs/promises";
+import { readFile, writeFile, rename } from "fs/promises";
 import { join } from "path";
 import type { CredentialsStore } from "../types.js";
 
@@ -19,6 +19,8 @@ export class LocalCredentialsStore implements CredentialsStore {
   }
 
   async write(data: Record<string, string>): Promise<void> {
-    await writeFile(this.filePath, JSON.stringify(data, null, 2), "utf-8");
+    const tmp = this.filePath + ".tmp";
+    await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
+    await rename(tmp, this.filePath);
   }
 }

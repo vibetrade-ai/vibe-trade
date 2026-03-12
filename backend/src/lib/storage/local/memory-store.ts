@@ -1,4 +1,4 @@
-import fs from "fs/promises";
+import fs, { rename } from "fs/promises";
 import path from "path";
 import type { MemoryStore } from "../types.js";
 
@@ -19,6 +19,8 @@ export class LocalMemoryStore implements MemoryStore {
   }
 
   async write(content: string): Promise<void> {
-    await fs.writeFile(this.filePath, content, "utf-8");
+    const tmp = this.filePath + ".tmp";
+    await fs.writeFile(tmp, content, "utf-8");
+    await rename(tmp, this.filePath);
   }
 }

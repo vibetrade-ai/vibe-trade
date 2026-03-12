@@ -1,29 +1,10 @@
-import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import type { TradeStore, TradeRecord, TradeStatus } from "../types.js";
+import { JsonArrayStore } from "./base.js";
 
-export class LocalTradeStore implements TradeStore {
-  private filePath: string;
-  private cache: TradeRecord[] | null = null;
-
+export class LocalTradeStore extends JsonArrayStore<TradeRecord> implements TradeStore {
   constructor(dataDir: string) {
-    this.filePath = join(dataDir, "trades.json");
-  }
-
-  private async load(): Promise<TradeRecord[]> {
-    if (this.cache) return this.cache;
-    try {
-      const content = await readFile(this.filePath, "utf-8");
-      this.cache = JSON.parse(content) as TradeRecord[];
-    } catch {
-      this.cache = [];
-    }
-    return this.cache;
-  }
-
-  private async save(trades: TradeRecord[]): Promise<void> {
-    this.cache = trades;
-    await writeFile(this.filePath, JSON.stringify(trades, null, 2), "utf-8");
+    super(join(dataDir, "trades.json"));
   }
 
   async append(trade: TradeRecord): Promise<void> {

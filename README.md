@@ -165,7 +165,7 @@ Heartbeat → snapshot → Trigger fires → Playbook loaded
 | 06 | **Learnings** | Immutable trade journal — reasoning captured at decision time, not reconstructed after |
 | 07 | **Skills** | Reusable instruction modules per Playbook _(coming soon)_ |
 
-→ [Full documentation](https://docs.vibetrade.app)
+→ [Full documentation](https://vibetrade-ai.github.io/docs)
 
 ---
 

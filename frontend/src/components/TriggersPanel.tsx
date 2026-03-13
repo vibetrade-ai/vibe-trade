@@ -181,7 +181,10 @@ function ActiveTriggerCard({ trigger, strategyName }: { trigger: Trigger; strate
 
 // ── Audit entry ────────────────────────────────────────────────────────────────
 
-function outcomeConfig(outcome: TriggerAuditEntry["outcome"]) {
+function outcomeConfig(outcome: TriggerAuditEntry["outcome"] | undefined) {
+  if (!outcome) {
+    return { label: "Unknown outcome", className: "text-gray-500", dot: "bg-gray-600" };
+  }
   switch (outcome.type) {
     case "hard_order_placed":
       return {
@@ -209,6 +212,8 @@ function outcomeConfig(outcome: TriggerAuditEntry["outcome"]) {
         className: "text-gray-400",
         dot: "bg-gray-500",
       };
+    default:
+      return { label: "Unknown outcome", className: "text-gray-500", dot: "bg-gray-600" };
   }
 }
 

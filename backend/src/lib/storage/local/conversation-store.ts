@@ -3,10 +3,17 @@ import path from "path";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ConversationMeta, ConversationStore } from "../types.js";
 
+const SYSTEM_FILES = new Set(["trigger-audit", "triggers", "approvals", "trades", "memory"]);
+
+function isSystemFile(id: string): boolean {
+  return SYSTEM_FILES.has(id);
+}
+
 export class LocalConversationStore implements ConversationStore {
   constructor(private readonly dataDir: string) {}
 
   async load(conversationId: string): Promise<Anthropic.MessageParam[]> {
+    if (isSystemFile(conversationId)) return [];
     const filePath = path.join(this.dataDir, `${conversationId}.jsonl`);
     let raw: string;
     try {
@@ -24,6 +31,7 @@ export class LocalConversationStore implements ConversationStore {
 
   async append(conversationId: string, messages: Anthropic.MessageParam[]): Promise<void> {
     if (messages.length === 0) return;
+    if (isSystemFile(conversationId)) return;
     const filePath = path.join(this.dataDir, `${conversationId}.jsonl`);
     const data = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
     try {
@@ -45,6 +53,7 @@ export class LocalConversationStore implements ConversationStore {
     for (const file of files) {
       if (!file.endsWith(".jsonl")) continue;
       const id = file.slice(0, -6);
+      if (isSystemFile(id)) continue;
       const filePath = path.join(this.dataDir, file);
       try {
         const [stat, raw] = await Promise.all([

@@ -5,8 +5,7 @@ import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, Strat
 import type { Trigger, SystemSnapshot, TradeArgs } from "./types.js";
 import { getSecurityId } from "../dhan/instruments.js";
 import { TOOLS } from "../tools.js";
-
-const anthropic = new Anthropic();
+import { getAnthropicClient } from "../credentials.js";
 
 const READ_ONLY_TOOLS = [
   "get_quote", "get_index_quote", "get_positions", "get_funds",
@@ -202,7 +201,7 @@ Analyze the situation and take appropriate action.`;
 
   while (!terminated && turns < 10) {
     turns++;
-    const resp = await anthropic.messages.create({
+    const resp = await getAnthropicClient().messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 4096,
       system: systemPrompt,
@@ -324,5 +323,15 @@ Analyze the situation and take appropriate action.`;
     if (!terminated) {
       history.push({ role: "user", content: toolResults });
     }
+  }
+
+  if (!terminated) {
+    const reason = turns >= 10 ? "Max turns (10) reached without action" : "Job ended without calling an action tool";
+    console.warn(`[heartbeat] reasoning job for ${trigger.id} exited without action: ${reason}`);
+    await auditStore.append({
+      id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+      firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+      outcome: { type: "reasoning_job_no_action", reason },
+    });
   }
 }

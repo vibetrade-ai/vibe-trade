@@ -275,7 +275,15 @@ export class HeartbeatService {
           this.activeJobs++;
           console.log(`[heartbeat] reasoning job started for trigger ${trigger.id}`);
           runReasoningJob(trigger, snapshot, this.dhan, this.triggers, this.approvals, this.triggerAudit, this.memory, this.strategyStore)
-            .catch(err => console.error(`[heartbeat] reasoning job error for ${trigger.id}:`, err))
+            .catch(async err => {
+              const error = err instanceof Error ? err.message : String(err);
+              console.error(`[heartbeat] reasoning job error for ${trigger.id}:`, err);
+              await this.triggerAudit.append({
+                id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+                firedAt: now, snapshotAtFire: snapshot!, action: trigger.action,
+                outcome: { type: "reasoning_job_no_action", reason: `Job threw an error: ${error}` },
+              }).catch(() => {});
+            })
             .finally(() => { this.activeJobs--; });
         }
       }

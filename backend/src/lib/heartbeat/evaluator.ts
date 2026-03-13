@@ -1,6 +1,6 @@
 import vm from "vm";
-import Anthropic from "@anthropic-ai/sdk";
 import type { Trigger, SystemSnapshot, EventDelta } from "./types.js";
+import { getAnthropicClient } from "../credentials.js";
 
 export function evaluateTimeTriggers(triggers: Trigger[]): string[] {
   const now = Date.now();
@@ -14,8 +14,6 @@ export function evaluateTimeTriggers(triggers: Trigger[]): string[] {
 
 type CodeCondition = { mode: "code"; expression: string };
 type LlmCondition  = { mode: "llm"; description: string };
-
-const anthropic = new Anthropic();
 
 const SAFE_QUOTE = { lastPrice: 0, previousClose: 0, changePercent: 0, open: 0, high: 0, low: 0, symbol: "", securityId: "" };
 
@@ -78,7 +76,7 @@ export async function evaluateLlmTriggers(snapshot: SystemSnapshot, triggers: Tr
   }));
 
   try {
-    const resp = await anthropic.messages.create({
+    const resp = await getAnthropicClient().messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 256,
       system: "Return ONLY a JSON array of trigger IDs whose conditions are currently met based on the market snapshot. Return [] if none. No markdown, no explanation.",

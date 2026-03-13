@@ -10,7 +10,7 @@ Vibe Trade is a local AI trading agent powered by Claude. Describe your strategy
 [![Powered by Claude](https://img.shields.io/badge/powered%20by-Claude-4DFF4D?labelColor=111)](https://anthropic.com)
 
 
-[Docs](https://vibetrade-ai.github.io/docs) · [How it works](#how-it-works)
+[Docs](https://vibetrade-ai.github.io/docs) · [How it works](#how-it-works) · [Talk to the founders](https://calendly.com/sahil-revise/30min-meeting)
 
 </div>
 
@@ -205,6 +205,14 @@ Everything runs on your machine. Your API key, credentials, trade history, and P
 ## Docs
 
 **[vibetrade-ai.github.io/docs](https://vibetrade-ai.github.io/docs)**
+
+---
+
+## Talk to the founders
+
+Have a strategy in mind? Want to run us through your setup? We're happy to jump on a call.
+
+**[Book a 30-minute call →](https://calendly.com/sahil-revise/30min-meeting)**
 
 ---
 

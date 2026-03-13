@@ -17,11 +17,9 @@ Vibe Trade is a local AI trading agent powered by Claude. Describe your strategy
 ---
 
 <div align="center">
-<br>
 
-> 📸 **Demo coming soon** 
+![Vibe Trade Demo](assets/demo.gif)
 
-<br>
 </div>
 
 ---

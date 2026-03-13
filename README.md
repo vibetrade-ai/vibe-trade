@@ -177,7 +177,9 @@ Heartbeat → snapshot → Trigger fires → Playbook loaded
 |------------|--|
 | Node.js ≥ 20 | Runtime |
 | Anthropic API key | Claude Sonnet for reasoning jobs, Haiku for condition evaluation |
-| Dhan account | First supported broker — credentials added at `/settings` |
+| Dhan account | Broker — credentials added at `/settings` |
+
+Vibe Trade is designed to support multiple brokers. We're starting with **Dhan** — more brokers are on the roadmap.
 
 Add your Anthropic API key and Dhan credentials at `http://localhost:3001/settings` once the server is running.
 
@@ -216,8 +218,3 @@ Have a strategy in mind? Want to run us through your setup? We're happy to jump 
 
 ---
 
-<div align="center">
-
-*Built on [Claude](https://anthropic.com) · NSE · Dhan · Local-first*
-
-</div>

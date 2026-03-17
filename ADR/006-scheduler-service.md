@@ -1,7 +1,7 @@
 # ADR-006: Scheduler Service — Repeating LLM Runs and Market-Closed Handling
 
 ## Status
-Accepted
+Superseded by [ADR-011](./011-unify-triggers-and-schedules.md)
 
 ## Context
 

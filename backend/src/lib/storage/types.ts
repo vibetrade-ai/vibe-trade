@@ -1,6 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Trigger, TriggerStatus, PendingApproval, ApprovalStatus, TriggerAuditEntry } from "../heartbeat/types.js";
-import type { Schedule, ScheduleStatus, ScheduleRun } from "../scheduler/types.js";
 
 export type StrategyState = "scanning" | "accumulating" | "holding" | "exiting" | "paused";
 export type StrategyStatus = "active" | "archived";
@@ -44,10 +43,11 @@ export interface MemoryStore {
 }
 
 export interface TriggerStore {
-  list(filter?: { status?: TriggerStatus }): Promise<Trigger[]>;
+  list(filter?: { status?: TriggerStatus | TriggerStatus[] }): Promise<Trigger[]>;
   get(id: string): Promise<Trigger | null>;
   upsert(trigger: Trigger): Promise<void>;
   setStatus(id: string, status: TriggerStatus, extra?: Partial<Trigger>): Promise<void>;
+  updateNextFireAt(id: string, nextFireAt: string, lastFiredAt?: string): Promise<void>;
   pruneExpired(): Promise<void>;
 }
 
@@ -62,20 +62,6 @@ export interface ApprovalStore {
 export interface TriggerAuditStore {
   append(entry: TriggerAuditEntry): Promise<void>;
   list(): Promise<TriggerAuditEntry[]>;
-}
-
-export interface ScheduleStore {
-  list(filter?: { status?: ScheduleStatus | ScheduleStatus[] }): Promise<Schedule[]>;
-  get(id: string): Promise<Schedule | null>;
-  upsert(schedule: Schedule): Promise<void>;
-  setStatus(id: string, status: ScheduleStatus): Promise<void>;
-  updateLastRun(id: string, lastRunAt: string, nextRunAt: string): Promise<void>;
-  updateNextRunAt(id: string, nextRunAt: string): Promise<void>;
-}
-
-export interface ScheduleRunStore {
-  append(run: ScheduleRun): Promise<void>;
-  list(limit?: number): Promise<ScheduleRun[]>;
 }
 
 export type TradeStatus = "pending" | "filled" | "cancelled" | "rejected";
@@ -123,8 +109,6 @@ export interface StorageProvider {
   triggers: TriggerStore;
   approvals: ApprovalStore;
   triggerAudit: TriggerAuditStore;
-  schedules: ScheduleStore;
-  scheduleRuns: ScheduleRunStore;
   strategies: StrategyStore;
   trades: TradeStore;
   credentials: CredentialsStore;

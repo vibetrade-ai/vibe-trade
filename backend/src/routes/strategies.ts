@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import type { StrategyStore, TriggerStore, ScheduleStore, TradeStore, TradeRecord } from "../lib/storage/index.js";
+import type { StrategyStore, TriggerStore, TradeStore, TradeRecord } from "../lib/storage/index.js";
 import type { DhanClient } from "../lib/dhan/client.js";
 import { getDhanClient } from "../lib/credentials.js";
 import { computeOpenPositions, computeRealizedPnl } from "../lib/trade-utils.js";
@@ -7,7 +7,7 @@ import { syncOrders } from "../lib/order-sync.js";
 
 export async function strategiesRoute(
   fastify: FastifyInstance,
-  opts: { strategies: StrategyStore; triggers: TriggerStore; schedules: ScheduleStore; trades: TradeStore },
+  opts: { strategies: StrategyStore; triggers: TriggerStore; trades: TradeStore },
 ) {
   // GET /api/strategies — list
   fastify.get("/api/strategies", async (request) => {
@@ -44,7 +44,7 @@ export async function strategiesRoute(
     return strategy;
   });
 
-  // GET /api/strategies/:id — get with linked triggers + schedules
+  // GET /api/strategies/:id — get with linked triggers
   fastify.get("/api/strategies/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const strategy = await opts.strategies.get(id);
@@ -52,13 +52,9 @@ export async function strategiesRoute(
       reply.code(404);
       return { error: "Not found" };
     }
-    const [allTriggers, allSchedules] = await Promise.all([
-      opts.triggers.list({ status: "active" }),
-      opts.schedules.list(),
-    ]);
+    const allTriggers = await opts.triggers.list({ status: ["active", "paused"] });
     const linkedTriggers = allTriggers.filter(t => t.strategyId === id);
-    const linkedSchedules = allSchedules.filter(s => s.strategyId === id);
-    return { ...strategy, linkedTriggers, linkedSchedules };
+    return { ...strategy, linkedTriggers };
   });
 
   // PATCH /api/strategies/:id/state — update state
@@ -105,25 +101,16 @@ export async function strategiesRoute(
       };
     }
 
-    // Cascade: cancel active triggers + delete active/paused schedules
-    const [activeTriggers, activeSchedules] = await Promise.all([
-      opts.triggers.list({ status: "active" }),
-      opts.schedules.list({ status: ["active", "paused"] }),
-    ]);
-    const linkedTriggers = activeTriggers.filter(t => t.strategyId === id);
-    const linkedSchedules = activeSchedules.filter(s => s.strategyId === id);
+    // Cascade: cancel active and paused triggers
+    const linkedTriggers = await opts.triggers.list({ status: ["active", "paused"] });
+    const triggersCancelled = linkedTriggers.filter(t => t.strategyId === id);
 
-    await Promise.all([
-      ...linkedTriggers.map(t => opts.triggers.setStatus(t.id, "cancelled")),
-      ...linkedSchedules.map(s => opts.schedules.setStatus(s.id, "deleted")),
-    ]);
-
+    await Promise.all(triggersCancelled.map(t => opts.triggers.setStatus(t.id, "cancelled")));
     await opts.strategies.setStatus(id, "archived");
 
     return {
       success: true,
-      triggersCancelled: linkedTriggers.length,
-      schedulesDeleted: linkedSchedules.length,
+      triggersCancelled: triggersCancelled.length,
     };
   });
 

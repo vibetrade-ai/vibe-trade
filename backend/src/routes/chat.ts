@@ -3,11 +3,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
 import type { DhanClient } from "../lib/dhan/client.js";
 import { getDhanClient, getAnthropicClient } from "../lib/credentials.js";
-import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createRegisterScheduleTool, createPauseScheduleTool, createResumeScheduleTool, createListSchedulesTool, createDeleteScheduleTool, createGetScheduleRunsTool, createStrategyTools, createTradeTools } from "../lib/tools.js";
+import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createPauseTriggerTool, createResumeTriggerTool, createGetTriggerRunsTool, createStrategyTools, createTradeTools } from "../lib/tools.js";
 import { DhanTokenExpiredError } from "../types.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
-import type { ConversationStore, MemoryStore, TriggerStore, ApprovalStore, ScheduleStore, StrategyStore, TradeStore } from "../lib/storage/index.js";
-import type { ScheduleRunStore } from "../lib/scheduler/store.js";
+import type { ConversationStore, MemoryStore, TriggerStore, TriggerAuditStore, ApprovalStore, StrategyStore, TradeStore } from "../lib/storage/index.js";
 import { getSecurityId } from "../lib/dhan/instruments.js";
 
 const SYSTEM_PROMPT = `You are VibeTrade, an AI-powered trading assistant connected to the user's Dhan brokerage account.
@@ -31,7 +30,7 @@ Error handling:
 - Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means Dhan's servers are having issues
 - If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
 
-export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; approvals: ApprovalStore; schedules: ScheduleStore; scheduleRuns: ScheduleRunStore; strategies: StrategyStore; trades: TradeStore }) {
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; triggerAudit: TriggerAuditStore; approvals: ApprovalStore; strategies: StrategyStore; trades: TradeStore }) {
   fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
     const pendingApprovals = new Map<string, (approved: boolean) => void>();
     const conversationId =
@@ -42,25 +41,19 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
     const registerTriggerTool = createRegisterTriggerTool(opts.triggers);
     const cancelTriggerTool = createCancelTriggerTool(opts.triggers);
     const listTriggersTool = createListTriggersTool(opts.triggers);
-    const registerScheduleTool = createRegisterScheduleTool(opts.schedules);
-    const pauseScheduleTool = createPauseScheduleTool(opts.schedules);
-    const resumeScheduleTool = createResumeScheduleTool(opts.schedules);
-    const listSchedulesTool = createListSchedulesTool(opts.schedules);
-    const deleteScheduleTool = createDeleteScheduleTool(opts.schedules);
-    const getScheduleRunsTool = createGetScheduleRunsTool(opts.scheduleRuns);
-    const strategyToolList = createStrategyTools(opts.strategies, opts.triggers, opts.schedules, opts.trades);
+    const pauseTriggerTool = createPauseTriggerTool(opts.triggers);
+    const resumeTriggerTool = createResumeTriggerTool(opts.triggers);
+    const getTriggerRunsTool = createGetTriggerRunsTool(opts.triggerAudit);
+    const strategyToolList = createStrategyTools(opts.strategies, opts.triggers, opts.trades);
     const tradeToolList = createTradeTools(opts.trades);
     const localTools: Record<string, ToolDefinition> = {
       update_memory: updateMemoryTool,
       register_trigger: registerTriggerTool,
       cancel_trigger: cancelTriggerTool,
       list_triggers: listTriggersTool,
-      register_schedule: registerScheduleTool,
-      pause_schedule: pauseScheduleTool,
-      resume_schedule: resumeScheduleTool,
-      list_schedules: listSchedulesTool,
-      delete_schedule: deleteScheduleTool,
-      get_schedule_runs: getScheduleRunsTool,
+      pause_trigger: pauseTriggerTool,
+      resume_trigger: resumeTriggerTool,
+      get_trigger_runs: getTriggerRunsTool,
     };
     for (const t of strategyToolList) {
       localTools[t.definition.name] = t;

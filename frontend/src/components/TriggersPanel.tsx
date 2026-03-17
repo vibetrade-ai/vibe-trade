@@ -5,12 +5,15 @@ import { getBackendHttpUrl } from "@/lib/backend-url";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type TriggerStatus = "active" | "fired" | "expired" | "cancelled";
+type TriggerStatus = "active" | "fired" | "expired" | "cancelled" | "paused";
 
 interface TriggerCondition {
-  mode: "code" | "llm";
+  mode: "code" | "llm" | "time" | "event";
   expression?: string;
   description?: string;
+  at?: string;
+  cron?: string;
+  fireAt?: string;
 }
 
 interface TradeArgs {
@@ -27,7 +30,7 @@ interface Trigger {
   scope: string;
   watchSymbols: string[];
   condition: TriggerCondition;
-  action: { type: "reasoning_job" } | { type: "hard_order"; tradeArgs: TradeArgs };
+  action: { type: "reasoning_job"; prompt?: string } | { type: "hard_order"; tradeArgs: TradeArgs };
   expiresAt?: string;
   createdAt: string;
   active: boolean;
@@ -35,6 +38,9 @@ interface Trigger {
   firedAt?: string;
   outcomeId?: string;
   strategyId?: string;
+  tradingDaysOnly?: boolean;
+  nextFireAt?: string;
+  lastFiredAt?: string;
 }
 
 interface Strategy {
@@ -52,7 +58,8 @@ interface TriggerAuditEntry {
     | { type: "hard_order_placed"; orderId: string }
     | { type: "hard_order_failed"; error: string }
     | { type: "reasoning_job_queued"; approvalId?: string }
-    | { type: "reasoning_job_no_action"; reason: string };
+    | { type: "reasoning_job_no_action"; reason: string }
+    | { type: "reasoning_job_completed"; summary: string; approvalIds: string[]; durationMs: number };
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -105,13 +112,62 @@ function ActionTypeBadge({ type }: { type: string }) {
   );
 }
 
+function CronBadge({ cron }: { cron: string }) {
+  return (
+    <span className="px-2 py-0.5 rounded bg-gray-700/60 text-gray-300 text-xs font-mono border border-gray-600/50">
+      {cron}
+    </span>
+  );
+}
+
 // ── Active Triggers Tab ────────────────────────────────────────────────────────
 
-function ActiveTriggerCard({ trigger, strategyName }: { trigger: Trigger; strategyName?: string }) {
+function ActiveTriggerCard({
+  trigger,
+  strategyName,
+  onRefresh,
+}: {
+  trigger: Trigger;
+  strategyName?: string;
+  onRefresh: () => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const isCron = trigger.condition.mode === "time" && !!trigger.condition.cron;
+  const isPaused = trigger.status === "paused";
+
   const conditionLabel =
     trigger.condition.mode === "code"
       ? trigger.condition.expression
-      : trigger.condition.description;
+      : trigger.condition.mode === "llm"
+      ? trigger.condition.description
+      : trigger.condition.mode === "time"
+      ? (trigger.condition.cron ?? trigger.condition.at ?? trigger.condition.fireAt)
+      : undefined;
+
+  const handlePause = async () => {
+    setLoading(true);
+    try {
+      await fetch(`${getBackendHttpUrl()}/api/triggers/${trigger.id}/pause`, { method: "POST" });
+      onRefresh();
+    } catch { /* ignore */ } finally { setLoading(false); }
+  };
+
+  const handleResume = async () => {
+    setLoading(true);
+    try {
+      await fetch(`${getBackendHttpUrl()}/api/triggers/${trigger.id}/resume`, { method: "POST" });
+      onRefresh();
+    } catch { /* ignore */ } finally { setLoading(false); }
+  };
+
+  const handleCancel = async () => {
+    if (!confirm(`Cancel trigger "${trigger.name}"?`)) return;
+    setLoading(true);
+    try {
+      await fetch(`${getBackendHttpUrl()}/api/triggers/${trigger.id}`, { method: "DELETE" });
+      onRefresh();
+    } catch { /* ignore */ } finally { setLoading(false); }
+  };
 
   return (
     <div className="rounded-xl border border-gray-700 bg-gray-800/60 p-4 space-y-3">
@@ -121,10 +177,23 @@ function ActiveTriggerCard({ trigger, strategyName }: { trigger: Trigger; strate
           <div className="flex flex-wrap gap-1.5 items-center">
             <ScopeBadge scope={trigger.scope} />
             <ActionTypeBadge type={trigger.action.type} />
+            {isCron && (
+              <span className="px-1.5 py-0.5 rounded text-xs bg-blue-900/40 text-blue-300 border border-blue-800/40">
+                recurring
+              </span>
+            )}
+            {trigger.tradingDaysOnly && (
+              <span className="px-1.5 py-0.5 rounded text-xs bg-[#4DFF4D]/10 text-[#4DFF4D] border border-[#4DFF4D]/30">
+                trading days only
+              </span>
+            )}
             {strategyName && <StrategyTag name={strategyName} />}
           </div>
         </div>
-        <span className="flex-shrink-0 w-2 h-2 rounded-full bg-green-400 mt-1.5" title="Active" />
+        <span
+          className={`flex-shrink-0 w-2 h-2 rounded-full mt-1.5 ${isPaused ? "bg-yellow-500" : "bg-green-400"}`}
+          title={trigger.status}
+        />
       </div>
 
       {/* Watch symbols */}
@@ -142,13 +211,37 @@ function ActiveTriggerCard({ trigger, strategyName }: { trigger: Trigger; strate
       )}
 
       {/* Condition */}
-      {conditionLabel && (
-        <div className="bg-gray-900/60 rounded-lg px-3 py-2 border border-gray-800">
-          <p className="text-xs text-gray-500 mb-0.5">
-            {trigger.condition.mode === "code" ? "Code condition" : "LLM condition"}
-          </p>
-          <p className="text-xs text-gray-300 font-mono leading-relaxed">{conditionLabel}</p>
+      {isCron ? (
+        <div className="space-y-2">
+          <CronBadge cron={trigger.condition.cron!} />
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            {trigger.nextFireAt && (
+              <div>
+                <p className="text-gray-500 mb-0.5">Next fire</p>
+                <p className="text-gray-300">{formatTs(trigger.nextFireAt)}</p>
+              </div>
+            )}
+            {trigger.lastFiredAt && (
+              <div>
+                <p className="text-gray-500 mb-0.5">Last fired</p>
+                <p className="text-gray-300">{formatTs(trigger.lastFiredAt)}</p>
+              </div>
+            )}
+          </div>
         </div>
+      ) : (
+        conditionLabel && (
+          <div className="bg-gray-900/60 rounded-lg px-3 py-2 border border-gray-800">
+            <p className="text-xs text-gray-500 mb-0.5">
+              {trigger.condition.mode === "code"
+                ? "Code condition"
+                : trigger.condition.mode === "llm"
+                ? "LLM condition"
+                : "Fire at"}
+            </p>
+            <p className="text-xs text-gray-300 font-mono leading-relaxed">{conditionLabel}</p>
+          </div>
+        )
       )}
 
       {/* Action detail for hard orders */}
@@ -169,11 +262,41 @@ function ActiveTriggerCard({ trigger, strategyName }: { trigger: Trigger; strate
         </div>
       )}
 
-      {/* Expiry */}
-      {trigger.expiresAt && (
+      {/* Expiry (for non-cron) */}
+      {!isCron && trigger.expiresAt && (
         <p className="text-xs text-gray-600">
           Expires: <span className="text-gray-500">{formatTs(trigger.expiresAt)}</span>
         </p>
+      )}
+
+      {/* Actions for cron triggers */}
+      {isCron && (
+        <div className="flex gap-2 pt-1">
+          {isPaused ? (
+            <button
+              onClick={handleResume}
+              disabled={loading}
+              className="px-3 py-1.5 rounded-lg bg-green-900/30 text-green-300 border border-green-800/40 text-xs font-medium hover:bg-green-900/50 disabled:opacity-50 transition-colors"
+            >
+              Resume
+            </button>
+          ) : (
+            <button
+              onClick={handlePause}
+              disabled={loading}
+              className="px-3 py-1.5 rounded-lg bg-yellow-900/30 text-yellow-300 border border-yellow-800/40 text-xs font-medium hover:bg-yellow-900/50 disabled:opacity-50 transition-colors"
+            >
+              Pause
+            </button>
+          )}
+          <button
+            onClick={handleCancel}
+            disabled={loading}
+            className="px-3 py-1.5 rounded-lg bg-red-900/30 text-red-400 border border-red-800/40 text-xs font-medium hover:bg-red-900/50 disabled:opacity-50 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
       )}
     </div>
   );
@@ -206,6 +329,14 @@ function outcomeConfig(outcome: TriggerAuditEntry["outcome"] | undefined) {
         className: "text-[#4DFF4D]",
         dot: "bg-[#4DFF4D]",
       };
+    case "reasoning_job_completed":
+      return {
+        label: outcome.approvalIds.length > 0
+          ? `${outcome.approvalIds.length} approval(s) queued — ${outcome.summary}`
+          : outcome.summary,
+        className: "text-[#4DFF4D]",
+        dot: "bg-[#4DFF4D]",
+      };
     case "reasoning_job_no_action":
       return {
         label: `No action: ${outcome.reason}`,
@@ -231,6 +362,15 @@ function AuditEntryRow({ entry }: { entry: TriggerAuditEntry }) {
           <ActionTypeBadge type={entry.action.type} />
           <span className={`text-xs ${oc.className}`}>{oc.label}</span>
         </div>
+        {entry.outcome.type === "reasoning_job_completed" && entry.outcome.approvalIds.length > 0 && (
+          <div className="flex flex-wrap gap-1 pt-0.5">
+            {entry.outcome.approvalIds.map((id) => (
+              <span key={id} className="px-1.5 py-0.5 rounded bg-gray-700/60 text-gray-400 text-xs font-mono">
+                {id.slice(0, 8)}…
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -352,12 +492,17 @@ export function TriggersPanel() {
             ) : triggers.length === 0 ? (
               <EmptyState
                 message="No active triggers"
-                sub="Triggers created by the heartbeat agent will appear here while active."
+                sub='Ask Claude to set up a trigger — e.g. "Monitor RELIANCE for a PE drop below 20" or "Run a premarket scan every market day at 9:15am"'
               />
             ) : (
               <div className="p-4 space-y-3">
                 {triggers.map((t) => (
-                  <ActiveTriggerCard key={t.id} trigger={t} strategyName={t.strategyId ? strategyMap[t.strategyId] : undefined} />
+                  <ActiveTriggerCard
+                    key={t.id}
+                    trigger={t}
+                    strategyName={t.strategyId ? strategyMap[t.strategyId] : undefined}
+                    onRefresh={fetchTriggers}
+                  />
                 ))}
               </div>
             )}

@@ -1,31 +1,98 @@
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
 import type { DhanClient } from "../dhan/client.js";
 import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore } from "../storage/index.js";
 import type { Trigger, SystemSnapshot, TradeArgs } from "./types.js";
-import { getSecurityId } from "../dhan/instruments.js";
 import { TOOLS } from "../tools.js";
 import { getAnthropicClient } from "../credentials.js";
+import { fetchCandles } from "../dhan/candles.js";
+import type { Candle } from "../indicators.js";
+import { computeIndicators } from "../indicators.js";
+import { DhanTokenExpiredError } from "../../types.js";
+import { syncOrders } from "../order-sync.js";
+
+// ── TtlCache ──────────────────────────────────────────────────────────────────
+class TtlCache<T> {
+  private entries = new Map<string, { value: T; expiresAt: number }>();
+  get(key: string): T | undefined {
+    const e = this.entries.get(key);
+    if (!e || Date.now() > e.expiresAt) { this.entries.delete(key); return undefined; }
+    return e.value;
+  }
+  set(key: string, value: T, ttlMs: number): void {
+    this.entries.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+}
+
+// Module-level candle cache — persists across runs, TTL keeps data fresh
+const candleCache = new TtlCache<Candle[]>();
+
+function candleTtl(interval: string): number {
+  return interval === "D" ? 4 * 3600_000 : parseInt(interval) * 60_000;
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const JOB_TIMEOUT_MS = 5 * 60 * 1000;
+const ANTHROPIC_CALL_TIMEOUT_MS = 120_000;
+const HISTORY_RESULT_LIMIT = 3000;
+
+const GENERIC_CACHEABLE = new Set([
+  "get_fundamentals", "fetch_news", "get_market_status", "search_instruments",
+  "get_top_movers", "compare_stocks", "get_etf_info",
+]);
+
+function summariseForHistory(toolName: string, text: string): string {
+  if (text.length <= HISTORY_RESULT_LIMIT) return text;
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return JSON.stringify(parsed.slice(0, 5), null, 2)
+        + `\n... [${parsed.length - 5} more items omitted. Call ${toolName} again with same args for full result.]`;
+    }
+  } catch { /* not JSON array */ }
+  return text.slice(0, HISTORY_RESULT_LIMIT)
+    + `\n... [${text.length - HISTORY_RESULT_LIMIT} chars omitted. Call ${toolName} again with same args for full result.]`;
+}
+
+function historicalSummary(symbol: string, interval: string, candles: Candle[]): string {
+  const periodHigh = Math.max(...candles.map(c => c.high));
+  const periodLow  = Math.min(...candles.map(c => c.low));
+  const avgVol     = Math.round(candles.reduce((s, c) => s + c.volume, 0) / candles.length);
+  return JSON.stringify({
+    symbol, interval, total_candles: candles.length,
+    period_high: periodHigh, period_low: periodLow, avg_volume: avgVol,
+    last_10_candles: candles.slice(-10),
+  }, null, 2);
+}
+
+function indicatorSummary(symbol: string, interval: string, candles: Candle[]): string {
+  const result = computeIndicators(candles);
+  return JSON.stringify({
+    symbol, interval, candles_analyzed: candles.length,
+    last_5_with_indicators: result.slice(-5),
+  }, null, 2);
+}
 
 const READ_ONLY_TOOLS = [
   "get_quote", "get_index_quote", "get_positions", "get_funds",
   "get_historical_data", "compute_indicators", "get_fundamentals",
-  "fetch_news", "get_market_status",
+  "fetch_news", "get_market_status", "get_top_movers", "search_instruments",
 ];
 
 const RUNNER_SYSTEM = `You are VibeTrade's autonomous analysis engine. A trigger has fired and you must analyze the situation and decide on a course of action.
 
-Available read-only tools: get_quote, get_index_quote, get_positions, get_funds, get_historical_data, compute_indicators, get_fundamentals, fetch_news, get_market_status
+Available read-only tools: get_quote, get_index_quote, get_positions, get_funds, get_historical_data, compute_indicators, get_fundamentals, fetch_news, get_market_status, get_top_movers, search_instruments
 
 Available action tools:
 - register_soft_trigger: Register a new soft (reasoning_job) trigger directly, no approval needed
-- queue_trade_approval: Queue a trade for user approval (user will approve/reject in the app)
+- queue_trade_approval: Queue a trade for user approval (user will approve/reject in the app). You may call this multiple times.
 - queue_hard_trigger_approval: Queue a new hard_order trigger for user consent
 - no_action: Signal that no action is warranted
 
 Rules:
 - Call read-only tools to gather data before deciding
 - Do NOT produce conversational text — your output is not shown to the user
+- You may queue multiple trade approvals before calling no_action or stopping
 - If no action is warranted, call no_action with your reasoning
 - Max 10 turns`;
 
@@ -61,7 +128,7 @@ const RUNNER_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "queue_trade_approval",
-    description: "Queue a trade proposal for user approval. The user will see it in the Approvals panel.",
+    description: "Queue a trade proposal for user approval. Call multiple times for multiple trades.",
     input_schema: {
       type: "object",
       properties: {
@@ -138,6 +205,25 @@ export async function runReasoningJob(
   memory: MemoryStore,
   strategyStore?: StrategyStore,
 ): Promise<void> {
+  const startedAt = Date.now();
+
+  // Pre-flight: fail fast if Dhan token is expired
+  try {
+    await dhan.getFunds();
+  } catch (err) {
+    if (err instanceof DhanTokenExpiredError) {
+      const msg = "Dhan token expired — update credentials in Settings.";
+      console.warn(`[heartbeat] skipping runner for trigger ${trigger.id}: ${msg}`);
+      await auditStore.append({
+        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        outcome: { type: "reasoning_job_no_action", reason: msg },
+      }).catch(() => {});
+      return;
+    }
+    // Non-token errors — let the job continue
+  }
+
   const memoryContent = await memory.read().catch(() => "");
   let systemPrompt = RUNNER_SYSTEM + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
 
@@ -182,7 +268,21 @@ IMPORTANT: Before queuing any trade, confirm the required capital does not excee
     ...RUNNER_TOOLS,
   ];
 
-  const initialUserMsg = `Trigger fired: "${trigger.name}"
+  // Determine user message: use action.prompt if present, else auto-build from snapshot
+  const isCronTrigger = !!(trigger.condition as { mode: string; cron?: string }).cron;
+  const actionPrompt = (trigger.action as { type: string; prompt?: string }).prompt;
+
+  let initialUserMsg: string;
+  if (actionPrompt) {
+    initialUserMsg = actionPrompt;
+  } else if (isCronTrigger) {
+    initialUserMsg = `Scheduled trigger fired: "${trigger.name}"
+Scope: ${trigger.scope}
+${trigger.watchSymbols.length > 0 ? `Watch symbols: ${trigger.watchSymbols.join(", ")}` : ""}
+
+Analyze the market and take appropriate action.`;
+  } else {
+    initialUserMsg = `Trigger fired: "${trigger.name}"
 Condition: ${JSON.stringify(trigger.condition)}
 Scope: ${trigger.scope}
 Watch symbols: ${trigger.watchSymbols.join(", ")}
@@ -191,147 +291,258 @@ Current market snapshot:
 ${JSON.stringify(snapshot, null, 2)}
 
 Analyze the situation and take appropriate action.`;
+  }
 
   const history: Anthropic.MessageParam[] = [
     { role: "user", content: initialUserMsg },
   ];
 
+  const resultCache = new Map<string, string>();
   let terminated = false;
   let turns = 0;
+  const approvalIds: string[] = [];
+  let lastNoActionReason = "";
+  let lastSummary = "";
 
-  while (!terminated && turns < 10) {
-    turns++;
-    const resp = await getAnthropicClient().messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4096,
-      system: systemPrompt,
-      tools: allTools,
-      messages: history,
-    });
+  async function runJobLoop(): Promise<void> {
+    while (!terminated && turns < 10) {
+      turns++;
+      const resp = await getAnthropicClient().messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 2048,
+        system: systemPrompt,
+        tools: allTools,
+        messages: history,
+      }, { timeout: ANTHROPIC_CALL_TIMEOUT_MS });
 
-    history.push({ role: "assistant", content: resp.content });
+      const respMsg = resp as Anthropic.Message;
+      history.push({ role: "assistant", content: respMsg.content });
 
-    if (resp.stop_reason === "end_turn") break;
+      if (respMsg.stop_reason === "end_turn") break;
 
-    const toolUses = resp.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
-    if (toolUses.length === 0) break;
+      const toolUses = respMsg.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+      if (toolUses.length === 0) break;
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      // Run all tool calls concurrently
+      const toolResultEntries = await Promise.all(toolUses.map(async (toolUse: Anthropic.ToolUseBlock) => {
+        const args = toolUse.input as Record<string, unknown>;
+        let resultText: string;
+        let shouldTerminate = false;
+        let noActionReason = "";
+        let approvalId = "";
+        let summaryUpdate = "";
 
-    for (const toolUse of toolUses) {
-      const args = toolUse.input as Record<string, unknown>;
-      let resultText: string;
+        try {
+          if (toolUse.name === "no_action") {
+            noActionReason = args.reason as string;
+            shouldTerminate = true;
+            resultText = "Noted. Job complete.";
 
-      if (toolUse.name === "no_action") {
-        console.log(`[heartbeat] reasoning job no_action: ${args.reason}`);
-        await auditStore.append({
-          id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-          firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
-          outcome: { type: "reasoning_job_no_action", reason: args.reason as string },
-        });
-        terminated = true;
-        resultText = "Noted. Job complete.";
+          } else if (toolUse.name === "queue_trade_approval") {
+            const tradeArgs: TradeArgs = {
+              symbol: args.symbol as string,
+              transaction_type: args.transaction_type as "BUY" | "SELL",
+              quantity: args.quantity as number,
+              order_type: args.order_type as "MARKET" | "LIMIT",
+              price: args.price as number | undefined,
+            };
+            const id = randomUUID();
+            const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+            await approvalStore.add({
+              id, kind: "trade",
+              triggerId: trigger.id, triggerName: trigger.name,
+              reasoning: args.reasoning as string,
+              tradeArgs, status: "pending",
+              createdAt: new Date().toISOString(), expiresAt: expiry,
+              ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+            });
+            approvalId = id;
+            summaryUpdate = "trade";
+            console.log(`[heartbeat] queued trade approval ${id}`);
+            resultText = `Trade approval queued (id: ${id}). You may queue more or call no_action when done.`;
 
-      } else if (toolUse.name === "queue_trade_approval") {
-        const tradeArgs: TradeArgs = {
-          symbol: args.symbol as string,
-          transaction_type: args.transaction_type as "BUY" | "SELL",
-          quantity: args.quantity as number,
-          order_type: args.order_type as "MARKET" | "LIMIT",
-          price: args.price as number | undefined,
-        };
-        const approvalId = randomUUID();
-        const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 min
-        await approvalStore.add({
-          id: approvalId, kind: "trade",
-          triggerId: trigger.id, triggerName: trigger.name,
-          reasoning: args.reasoning as string,
-          tradeArgs, status: "pending",
-          createdAt: new Date().toISOString(), expiresAt: expiry,
-          ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
-        });
-        console.log(`[heartbeat] queued trade approval ${approvalId}`);
-        await auditStore.append({
-          id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-          firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
-          outcome: { type: "reasoning_job_queued", approvalId },
-        });
-        terminated = true;
-        resultText = `Trade approval queued (id: ${approvalId}). User will be notified.`;
+          } else if (toolUse.name === "queue_hard_trigger_approval") {
+            const id = randomUUID();
+            const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+            await approvalStore.add({
+              id, kind: "hard_trigger",
+              originatingTriggerId: trigger.id,
+              originatingTriggerName: trigger.name,
+              reasoning: args.reasoning as string,
+              proposedTrigger: {
+                name: args.name as string,
+                scope: args.scope as "symbol" | "market" | "portfolio",
+                watchSymbols: args.watchSymbols as string[],
+                condition: args.condition as { mode: "code"; expression: string } | { mode: "llm"; description: string },
+                action: { type: "hard_order", tradeArgs: args.tradeArgs as TradeArgs },
+                expiresAt: args.expiresAt as string | undefined,
+                status: "active" as const,
+              },
+              status: "pending",
+              createdAt: new Date().toISOString(), expiresAt: expiry,
+            });
+            approvalId = id;
+            console.log(`[heartbeat] queued hard_trigger approval ${id}`);
+            resultText = `Hard trigger approval queued (id: ${id}).`;
 
-      } else if (toolUse.name === "queue_hard_trigger_approval") {
-        const htApprovalId = randomUUID();
-        const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-        await approvalStore.add({
-          id: htApprovalId, kind: "hard_trigger",
-          originatingTriggerId: trigger.id,
-          originatingTriggerName: trigger.name,
-          reasoning: args.reasoning as string,
-          proposedTrigger: {
-            name: args.name as string,
-            scope: args.scope as "symbol" | "market" | "portfolio",
-            watchSymbols: args.watchSymbols as string[],
-            condition: args.condition as { mode: "code"; expression: string } | { mode: "llm"; description: string },
-            action: { type: "hard_order", tradeArgs: args.tradeArgs as TradeArgs },
-            expiresAt: args.expiresAt as string | undefined,
-            status: "active" as const,
-          },
-          status: "pending",
-          createdAt: new Date().toISOString(), expiresAt: expiry,
-        });
-        console.log(`[heartbeat] queued hard_trigger approval ${htApprovalId}`);
-        terminated = true;
-        resultText = `Hard trigger approval queued (id: ${htApprovalId}).`;
+          } else if (toolUse.name === "register_soft_trigger") {
+            const newTrigger: Trigger = {
+              id: randomUUID(),
+              name: args.name as string,
+              scope: args.scope as "symbol" | "market" | "portfolio",
+              watchSymbols: args.watchSymbols as string[],
+              condition: args.condition as { mode: "code"; expression: string } | { mode: "llm"; description: string },
+              action: { type: "reasoning_job" },
+              expiresAt: args.expiresAt as string | undefined,
+              createdAt: new Date().toISOString(),
+              active: true,
+              status: "active",
+              ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+              ...(args.context ? { context: args.context as string } : {}),
+            };
+            await triggerStore.upsert(newTrigger);
+            console.log(`[heartbeat] registered new soft trigger ${newTrigger.id}: ${newTrigger.name}`);
+            resultText = `Trigger "${newTrigger.name}" registered (id: ${newTrigger.id}).`;
 
-      } else if (toolUse.name === "register_soft_trigger") {
-        const newTrigger: Trigger = {
-          id: randomUUID(),
-          name: args.name as string,
-          scope: args.scope as "symbol" | "market" | "portfolio",
-          watchSymbols: args.watchSymbols as string[],
-          condition: args.condition as { mode: "code"; expression: string } | { mode: "llm"; description: string },
-          action: { type: "reasoning_job" },
-          expiresAt: args.expiresAt as string | undefined,
-          createdAt: new Date().toISOString(),
-          active: true,
-          status: "active",
-          ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
-          ...(args.context ? { context: args.context as string } : {}),
-        };
-        await triggerStore.upsert(newTrigger);
-        console.log(`[heartbeat] registered new soft trigger ${newTrigger.id}: ${newTrigger.name}`);
-        resultText = `Trigger "${newTrigger.name}" registered (id: ${newTrigger.id}).`;
+          } else if (toolUse.name === "get_historical_data") {
+            const symbol = args.symbol as string;
+            const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
+            const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
+            const cacheKey = `get_historical_data:${JSON.stringify(args)}`;
+            const cached = resultCache.get(cacheKey);
+            if (cached !== undefined) {
+              resultText = cached;
+            } else {
+              const candleKey = `${symbol}:${interval}:${days}`;
+              let candles = candleCache.get(candleKey);
+              if (!candles) {
+                candles = await fetchCandles(symbol, interval, days, dhan);
+                candleCache.set(candleKey, candles, candleTtl(interval));
+              }
+              const summary = historicalSummary(symbol, interval, candles);
+              resultCache.set(cacheKey, summary);
+              resultText = summary;
+            }
 
-      } else {
-        // Read-only tools — delegate to TOOLS
-        const toolDef = TOOLS[toolUse.name];
-        if (toolDef) {
-          try {
-            // Create a minimal DhanClient proxy for read-only tools
-            resultText = await toolDef.handler(args, dhan);
-          } catch (err) {
-            resultText = `TOOL_ERROR: ${err instanceof Error ? err.message : String(err)}`;
+          } else if (toolUse.name === "compute_indicators") {
+            const symbol = args.symbol as string;
+            const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
+            const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
+            const cacheKey = `compute_indicators:${JSON.stringify(args)}`;
+            const cached = resultCache.get(cacheKey);
+            if (cached !== undefined) {
+              resultText = cached;
+            } else {
+              const candleKey = `${symbol}:${interval}:${days}`;
+              let candles = candleCache.get(candleKey);
+              if (!candles) {
+                candles = await fetchCandles(symbol, interval, days, dhan);
+                candleCache.set(candleKey, candles, candleTtl(interval));
+              }
+              if (candles.length < 26) {
+                resultText = JSON.stringify({ error: "Insufficient data for indicators." });
+              } else {
+                const summary = indicatorSummary(symbol, interval, candles);
+                resultCache.set(cacheKey, summary);
+                resultText = summary;
+              }
+            }
+
+          } else {
+            const cacheKey = `${toolUse.name}:${JSON.stringify(args)}`;
+            const toolDef = TOOLS[toolUse.name];
+            if (!toolDef) {
+              resultText = `TOOL_ERROR: Unknown tool "${toolUse.name}"`;
+            } else if (GENERIC_CACHEABLE.has(toolUse.name)) {
+              const cached = resultCache.get(cacheKey);
+              if (cached !== undefined) {
+                resultText = cached;
+              } else {
+                const fullResult = await toolDef.handler(args, dhan);
+                resultCache.set(cacheKey, fullResult);
+                resultText = summariseForHistory(toolUse.name, fullResult);
+              }
+            } else {
+              resultText = await toolDef.handler(args, dhan);
+            }
           }
-        } else {
-          resultText = `TOOL_ERROR: Unknown tool "${toolUse.name}"`;
+        } catch (err) {
+          resultText = `TOOL_ERROR: ${err instanceof Error ? err.message : String(err)}`;
+        }
+
+        return { id: toolUse.id, resultText, shouldTerminate, noActionReason, approvalId, summaryUpdate };
+      }));
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const entry of toolResultEntries) {
+        toolResults.push({ type: "tool_result", tool_use_id: entry.id, content: entry.resultText });
+        if (entry.shouldTerminate) {
+          terminated = true;
+          lastNoActionReason = entry.noActionReason;
+        }
+        if (entry.approvalId) {
+          approvalIds.push(entry.approvalId);
+          if (entry.summaryUpdate === "trade") {
+            lastSummary = `Queued ${approvalIds.length} trade approval(s)`;
+          }
         }
       }
 
-      toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: resultText });
-    }
-
-    if (!terminated) {
-      history.push({ role: "user", content: toolResults });
+      if (!terminated) {
+        history.push({ role: "user", content: toolResults });
+      }
     }
   }
 
-  if (!terminated) {
-    const reason = turns >= 10 ? "Max turns (10) reached without action" : "Job ended without calling an action tool";
-    console.warn(`[heartbeat] reasoning job for ${trigger.id} exited without action: ${reason}`);
+  try {
+    // Race against wall-clock timeout
+    await Promise.race([
+      runJobLoop(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Job exceeded 5-minute wall-clock limit")), JOB_TIMEOUT_MS)
+      ),
+    ]);
+
+    const durationMs = Date.now() - startedAt;
+    const isCron = !!(trigger.condition as { mode: string; cron?: string }).cron;
+
+    if (lastNoActionReason) {
+      await auditStore.append({
+        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        outcome: { type: "reasoning_job_no_action", reason: lastNoActionReason },
+        ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+      });
+    } else if (isCron || approvalIds.length > 0) {
+      // Use richer completed outcome for cron runs or multi-approval runs
+      const summary = approvalIds.length > 0
+        ? lastSummary || `Queued ${approvalIds.length} approval(s)`
+        : "Completed with no explicit actions";
+      await auditStore.append({
+        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        outcome: { type: "reasoning_job_completed", summary, approvalIds, durationMs },
+        ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+      });
+    } else {
+      // Single approval or no action for legacy triggers
+      await auditStore.append({
+        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        outcome: { type: "reasoning_job_queued", approvalId: approvalIds[0] },
+        ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+      });
+    }
+
+    console.log(`[heartbeat] runner for ${trigger.id} completed in ${durationMs}ms`);
+
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`[heartbeat] reasoning job for ${trigger.id} exited: ${reason}`);
     await auditStore.append({
       id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
       firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
       outcome: { type: "reasoning_job_no_action", reason },
-    });
+    }).catch(() => {});
   }
 }

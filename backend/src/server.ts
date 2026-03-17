@@ -1,5 +1,6 @@
 import "dotenv/config";
-import { existsSync } from "fs";
+import { existsSync, renameSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import { resolve, join } from "path";
 import Fastify from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
@@ -10,13 +11,14 @@ import { chatRoute } from "./routes/chat.js";
 import { conversationsRoute } from "./routes/conversations.js";
 import { approvalsRoute } from "./routes/approvals.js";
 import { triggersRoute } from "./routes/triggers.js";
-import { schedulesRoute } from "./routes/schedules.js";
 import { strategiesRoute } from "./routes/strategies.js";
 import { settingsRoute } from "./routes/settings.js";
 import { createStorageProvider } from "./lib/storage/index.js";
 import { credentialsStore, getDhanClient } from "./lib/credentials.js";
 import { HeartbeatService } from "./lib/heartbeat/service.js";
-import { SchedulerService } from "./lib/scheduler/service.js";
+import { getDataDir } from "./lib/data-dir.js";
+import { computeNextRunAt, computeNextTradingRunAt } from "./lib/heartbeat/cron-utils.js";
+import type { Trigger } from "./lib/heartbeat/types.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 
@@ -27,7 +29,104 @@ const serveStatic = existsSync(staticDir);
 
 const fastify = Fastify({ logger: { level: "info" } });
 
+/**
+ * One-time migration: convert schedules.json → triggers.json entries.
+ * Idempotent — skips entries already present in triggers.json.
+ */
+async function migrateSchedulesToTriggers(dataDir: string): Promise<void> {
+  const schedulesPath = join(dataDir, "schedules.json");
+  const triggersPath = join(dataDir, "triggers.json");
+
+  if (!existsSync(schedulesPath)) return;
+
+  try {
+    const schedulesRaw = await readFile(schedulesPath, "utf-8");
+    const schedules = JSON.parse(schedulesRaw) as Array<{
+      id: string;
+      name: string;
+      description: string;
+      cronExpression: string;
+      tradingDaysOnly: boolean;
+      prompt: string;
+      status: string;
+      lastRunAt?: string;
+      nextRunAt: string;
+      createdAt: string;
+      strategyId?: string;
+      staleAfterMs?: number;
+    }>;
+
+    if (schedules.length === 0) {
+      renameSync(schedulesPath, schedulesPath + ".migrated");
+      return;
+    }
+
+    let triggers: Trigger[] = [];
+    if (existsSync(triggersPath)) {
+      const triggersRaw = await readFile(triggersPath, "utf-8");
+      triggers = JSON.parse(triggersRaw) as Trigger[];
+    }
+
+    const existingIds = new Set(triggers.map(t => t.id));
+    let added = 0;
+
+    for (const s of schedules) {
+      if (existingIds.has(s.id)) continue;
+      if (s.status === "deleted") continue;
+
+      // Compute next fire at from now if nextRunAt is in the past
+      const now = new Date();
+      let nextFireAt: string;
+      try {
+        const existingNext = new Date(s.nextRunAt);
+        if (existingNext > now) {
+          nextFireAt = s.nextRunAt;
+        } else {
+          nextFireAt = s.tradingDaysOnly
+            ? computeNextTradingRunAt(s.cronExpression, now)
+            : computeNextRunAt(s.cronExpression, now);
+        }
+      } catch {
+        nextFireAt = computeNextRunAt(s.cronExpression, now);
+      }
+
+      const trigger: Trigger = {
+        id: s.id,
+        name: s.name,
+        scope: "market",
+        watchSymbols: [],
+        condition: { mode: "time", cron: s.cronExpression },
+        action: { type: "reasoning_job", prompt: s.prompt },
+        tradingDaysOnly: s.tradingDaysOnly,
+        staleAfterMs: s.staleAfterMs,
+        nextFireAt,
+        lastFiredAt: s.lastRunAt,
+        status: s.status === "paused" ? "paused" : "active",
+        active: s.status === "active",
+        createdAt: s.createdAt,
+        strategyId: s.strategyId,
+        context: s.description,
+      };
+      triggers.push(trigger);
+      added++;
+    }
+
+    if (added > 0) {
+      await writeFile(triggersPath, JSON.stringify(triggers, null, 2), "utf-8");
+      console.log(`[migration] Migrated ${added} schedule(s) to triggers.json`);
+    }
+
+    renameSync(schedulesPath, schedulesPath + ".migrated");
+    console.log(`[migration] schedules.json renamed to schedules.json.migrated`);
+  } catch (err) {
+    console.error("[migration] Failed to migrate schedules:", err);
+  }
+}
+
 async function start() {
+  const dataDir = getDataDir();
+  await migrateSchedulesToTriggers(dataDir);
+
   const storage = createStorageProvider();
   credentialsStore.init(storage.credentials);
   await credentialsStore.load();
@@ -36,7 +135,7 @@ async function start() {
     origin: serveStatic
       ? true
       : (process.env.FRONTEND_URL ?? "http://localhost:3000"),
-    methods: ["GET", "POST", "DELETE"],
+    methods: ["GET", "POST", "PATCH", "DELETE"],
   });
 
   await fastify.register(fastifyWebsocket);
@@ -47,17 +146,15 @@ async function start() {
     store: storage.conversations,
     memory: storage.memory,
     triggers: storage.triggers,
+    triggerAudit: storage.triggerAudit,
     approvals: storage.approvals,
-    schedules: storage.schedules,
-    scheduleRuns: storage.scheduleRuns,
     strategies: storage.strategies,
     trades: storage.trades,
   });
   await fastify.register(conversationsRoute, { store: storage.conversations });
   await fastify.register(approvalsRoute, { approvals: storage.approvals, triggers: storage.triggers });
   await fastify.register(triggersRoute, { triggers: storage.triggers, triggerAudit: storage.triggerAudit });
-  await fastify.register(schedulesRoute, { schedules: storage.schedules, scheduleRuns: storage.scheduleRuns });
-  await fastify.register(strategiesRoute, { strategies: storage.strategies, triggers: storage.triggers, schedules: storage.schedules, trades: storage.trades });
+  await fastify.register(strategiesRoute, { strategies: storage.strategies, triggers: storage.triggers, trades: storage.trades });
 
   fastify.get("/health", async () => ({ ok: true }));
 
@@ -91,21 +188,10 @@ async function start() {
     console.warn("[heartbeat] Failed to start (Dhan credentials not configured):", (err as Error).message);
   }
 
-  // Start scheduler
-  let scheduler: SchedulerService | null = null;
-  try {
-    const schedulerDhan = getDhanClient();
-    scheduler = new SchedulerService(schedulerDhan, storage.schedules, storage.scheduleRuns, storage.triggers, storage.approvals, storage.memory, 60_000, storage.strategies, storage.trades);
-    scheduler.start();
-  } catch (err) {
-    console.warn("[scheduler] Failed to start:", (err as Error).message);
-  }
-
-  credentialsStore.registerServices({ heartbeat, scheduler });
+  credentialsStore.registerServices({ heartbeat });
 
   const shutdown = async () => {
     heartbeat?.stop();
-    scheduler?.stop();
     await fastify.close();
     process.exit(0);
   };

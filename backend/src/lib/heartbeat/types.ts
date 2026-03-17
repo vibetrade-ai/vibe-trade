@@ -1,5 +1,5 @@
 export type TriggerScope = "symbol" | "market" | "portfolio";
-export type TriggerStatus = "active" | "fired" | "expired" | "cancelled";
+export type TriggerStatus = "active" | "fired" | "expired" | "cancelled" | "paused";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export interface TradeArgs {
@@ -41,11 +41,11 @@ export type EventCondition =
 export type TriggerCondition =
   | { mode: "code"; expression: string }
   | { mode: "llm"; description: string }
-  | { mode: "time"; fireAt: string }
+  | { mode: "time"; fireAt?: string; at?: string; cron?: string }
   | EventCondition;
 
 export type TriggerAction =
-  | { type: "reasoning_job" }
+  | { type: "reasoning_job"; prompt?: string }
   | { type: "hard_order"; tradeArgs: TradeArgs };
 
 export interface Trigger {
@@ -64,6 +64,18 @@ export interface Trigger {
   strategyId?: string;
   /** Optional inline context/goal injected into the reasoning job prompt */
   context?: string;
+  /** If true, re-arms after firing (for code/llm/event triggers with cooldownMs) */
+  recurring?: boolean;
+  /** Min ms between firings for recurring code/llm/event triggers */
+  cooldownMs?: number;
+  /** Skip non-NSE-trading days (meaningful for any recurring trigger) */
+  tradingDaysOnly?: boolean;
+  /** Skip if overdue by more than this ms (time/cron only) */
+  staleAfterMs?: number;
+  /** Precomputed next ISO fire time (cron triggers only) */
+  nextFireAt?: string;
+  /** Updated after each firing (used for cooldown check) */
+  lastFiredAt?: string;
 }
 
 export interface QuoteEntry {
@@ -135,7 +147,8 @@ export interface TriggerAuditEntry {
     | { type: "hard_order_placed"; orderId: string }
     | { type: "hard_order_failed"; error: string }
     | { type: "reasoning_job_queued"; approvalId?: string }
-    | { type: "reasoning_job_no_action"; reason: string };
+    | { type: "reasoning_job_no_action"; reason: string }
+    | { type: "reasoning_job_completed"; summary: string; approvalIds: string[]; durationMs: number };
   strategyId?: string;
 }
 

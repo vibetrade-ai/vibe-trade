@@ -8,10 +8,11 @@ export class LocalTriggerStore extends JsonArrayStore<Trigger> implements Trigge
     super(join(dataDir, "triggers.json"));
   }
 
-  async list(filter?: { status?: TriggerStatus }): Promise<Trigger[]> {
+  async list(filter?: { status?: TriggerStatus | TriggerStatus[] }): Promise<Trigger[]> {
     const all = await this.load();
-    const status = filter?.status ?? "active";
-    return all.filter(t => t.status === status);
+    if (!filter?.status) return all.filter(t => t.status === "active");
+    const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
+    return all.filter(t => statuses.includes(t.status));
   }
 
   async get(id: string): Promise<Trigger | null> {
@@ -32,6 +33,18 @@ export class LocalTriggerStore extends JsonArrayStore<Trigger> implements Trigge
     const idx = all.findIndex(t => t.id === id);
     if (idx < 0) return;
     all[idx] = { ...all[idx], status, active: status === "active", ...extra };
+    await this.save(all);
+  }
+
+  async updateNextFireAt(id: string, nextFireAt: string, lastFiredAt?: string): Promise<void> {
+    const all = await this.load();
+    const idx = all.findIndex(t => t.id === id);
+    if (idx < 0) return;
+    all[idx] = {
+      ...all[idx],
+      nextFireAt,
+      ...(lastFiredAt !== undefined ? { lastFiredAt } : {}),
+    };
     await this.save(all);
   }
 

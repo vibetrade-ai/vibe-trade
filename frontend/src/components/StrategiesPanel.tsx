@@ -88,7 +88,7 @@ function StrategyCard({ strategy, onRefresh, onViewPerformance }: { strategy: St
   const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const handleArchive = async () => {
-    if (!confirm(`Archive "${strategy.name}"?\n\nThis will cancel all linked triggers and delete all linked schedules. The strategy will no longer appear in the active list.\n\nContinue?`)) return;
+    if (!confirm(`Archive "${strategy.name}"?\n\nThis will cancel all linked triggers. The strategy will no longer appear in the active list.\n\nContinue?`)) return;
     setArchiving(true);
     setArchiveError(null);
     try {

@@ -1,7 +1,7 @@
 # ADR-010: Scheduler Runner — Latency, Cost, and Timeout Fixes
 
 ## Status
-Accepted
+Superseded by [ADR-011](./011-unify-triggers-and-schedules.md)
 
 ## Context
 

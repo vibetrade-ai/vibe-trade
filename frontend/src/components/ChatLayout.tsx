@@ -6,15 +6,14 @@ import { Sidebar } from "./Sidebar";
 import { ConnectionBadge } from "./ConnectionBadge";
 import { ApprovalsPanel } from "./ApprovalsPanel";
 import { TriggersPanel } from "./TriggersPanel";
-import { SchedulesPanel } from "./SchedulesPanel";
 import { StrategiesPanel } from "./StrategiesPanel";
 import { SettingsModal } from "./SettingsModal";
 import { SettingsPanel } from "./SettingsPanel";
 import { useApprovals } from "../hooks/useApprovals";
 import { useSettings } from "../hooks/useSettings";
-import { ChatsCircle, CheckCircle, Lightning, CalendarBlank, GameController, GearSix } from "@phosphor-icons/react";
+import { ChatsCircle, CheckCircle, Lightning, GameController, GearSix } from "@phosphor-icons/react";
 
-type Tab = "chat" | "approvals" | "triggers" | "schedules" | "strategies" | "settings";
+type Tab = "chat" | "approvals" | "triggers" | "strategies" | "settings";
 
 function PendingBadge({ count }: { count: number }) {
   if (count === 0) return null;
@@ -70,7 +69,6 @@ export function ChatLayout() {
     { id: "chat", label: "Chat", icon: <ChatsCircle weight="bold" size={16} /> },
     { id: "approvals", label: "Approvals", icon: <CheckCircle weight="bold" size={16} /> },
     { id: "triggers", label: "Triggers", icon: <Lightning weight="bold" size={16} /> },
-    { id: "schedules", label: "Schedules", icon: <CalendarBlank weight="bold" size={16} /> },
     { id: "strategies", label: "Strategies", icon: <GameController weight="bold" size={16} /> },
     { id: "settings", label: "Settings", icon: <GearSix weight="bold" size={16} /> },
   ];
@@ -140,13 +138,6 @@ export function ChatLayout() {
           {activeTab === "triggers" && (
             <div className="flex-1 overflow-hidden flex flex-col">
               <TriggersPanel />
-            </div>
-          )}
-
-          {/* Schedules panel */}
-          {activeTab === "schedules" && (
-            <div className="flex-1 overflow-hidden flex flex-col">
-              <SchedulesPanel />
             </div>
           )}
 

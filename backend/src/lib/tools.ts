@@ -1,8 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { parseExpression } from "cron-parser";
 import { DhanClient } from "./dhan/client.js";
-import type { MemoryStore, TriggerStore, ScheduleStore, StrategyStore, TradeStore } from "./storage/index.js";
-import type { ScheduleRunStore } from "./scheduler/store.js";
+import type { MemoryStore, TriggerStore, TriggerAuditStore, StrategyStore, TradeStore } from "./storage/index.js";
 import type { TradeArgs } from "./heartbeat/types.js";
 import {
   getSecurityId,
@@ -775,7 +774,9 @@ export function createRegisterTriggerTool(store: TriggerStore): ToolDefinition {
 Condition modes:
 - "code": A JavaScript expression evaluated against the snapshot. Variables: quotes["SYMBOL"].lastPrice/changePercent/open/high/low, positions (array), funds.availableBalance, nifty50.lastPrice/changePercent, banknifty.lastPrice/changePercent. When event triggers are also active, the sandbox also exposes: events.newPositions, events.closedPositions, events.newHeadlines (Record<category, NewsItem[]>), fundamentals (Record<symbol, Fundamentals|null>), vix.lastPrice. Expression must return exactly true to fire.
 - "llm": Natural language condition evaluated by AI each tick. Use for qualitative/nuanced conditions.
-- "time": Fires once at a specific ISO timestamp (fireAt field).
+- "time": Fire at a specific time.
+  • One-shot: use the "at" field with an ISO timestamp — fires once when Date.now() >= at
+  • Recurring: use the "cron" field with a 5-field cron expression in IST (e.g. "15 9 * * 1-5" for 9:15am Mon-Fri). Combines with tradingDaysOnly to skip NSE holidays.
 - "event": Typed, structured event condition. Pick a kind and fill in its parameters:
   • kind "position_opened"     — fires when any of symbols[] enters the portfolio. params: symbols[]
   • kind "position_closed"     — fires when any of symbols[] leaves the portfolio. params: symbols[]
@@ -791,20 +792,17 @@ Condition modes:
   • kind "nifty_rise_percent"  — fires when Nifty50 intraday rally exceeds threshold (e.g. threshold: 1.5 means +1.5%). params: threshold
 
 Two action types:
-- "reasoning_job": Fires an autonomous Sonnet analysis loop that can queue trade proposals.
+- "reasoning_job": Fires an autonomous Sonnet analysis loop that can queue trade proposals. Always include prompt.
 - "hard_order": Executes a trade immediately when condition fires. REQUIRES user approval — you will receive a prompt.
 
-watchSymbols: List every symbol referenced in the condition so the snapshot builder fetches them.
+watchSymbols: List every symbol referenced in the condition so the snapshot builder fetches them. Use [] for market/time conditions.
 
 Examples:
 - condition: { mode: "code", expression: "quotes['RELIANCE'].lastPrice < 2800" }
-- condition: { mode: "code", expression: "vix?.lastPrice > 20 && nifty50.changePercent < -1.5" }
-- condition: { mode: "event", kind: "position_opened", symbols: ["RELIANCE"] }
-- condition: { mode: "event", kind: "position_opened", symbols: ["*"] }  ← fires on ANY new position
-- condition: { mode: "event", kind: "pe_below", symbol: "TATASTEEL", threshold: 10 }
-- condition: { mode: "event", kind: "vix_above", threshold: 18 }
-- condition: { mode: "event", kind: "nifty_drop_percent", threshold: 1.5 }
-- condition: { mode: "event", kind: "news_mention", symbols: ["INFY"], categories: ["companies"] }`,
+- condition: { mode: "time", cron: "15 9 * * 1-5" }, tradingDaysOnly: true  ← recurring 9:15am
+- condition: { mode: "time", at: "2026-03-20T09:15:00.000Z" }  ← one-shot
+- condition: { mode: "event", kind: "position_opened", symbols: ["*"] }
+- condition: { mode: "event", kind: "vix_above", threshold: 18 }`,
       input_schema: {
         type: "object",
         properties: {
@@ -813,7 +811,7 @@ Examples:
           watchSymbols: {
             type: "array",
             items: { type: "string" },
-            description: "All NSE symbols referenced in the condition (for snapshot fetching). Use [] for market/portfolio conditions.",
+            description: "All NSE symbols referenced in the condition (for snapshot fetching). Use [] for market/portfolio/time conditions.",
           },
           condition: {
             type: "object",
@@ -822,9 +820,10 @@ Examples:
               mode: { type: "string", enum: ["code", "llm", "time", "event"] },
               expression: { type: "string", description: "JS expression (code mode)" },
               description: { type: "string", description: "Natural language condition (llm mode)" },
-              fireAt: { type: "string", description: "ISO timestamp for time-mode triggers — fires once when Date.now() >= fireAt" },
+              at: { type: "string", description: "ISO timestamp for one-shot time triggers" },
+              cron: { type: "string", description: "5-field cron expression in IST for recurring time triggers (e.g. '15 9 * * 1-5')" },
               kind: { type: "string", enum: ["position_opened", "position_closed", "news_mention", "sentiment_positive", "sentiment_negative", "pe_below", "pe_above", "fundamentals_changed", "vix_above", "vix_below", "nifty_drop_percent", "nifty_rise_percent"], description: "Event kind (event mode only)" },
-              symbols: { type: "array", items: { type: "string" }, description: "Symbols to watch (position/news/sentiment event kinds). Use [\"*\"] to match any symbol — e.g. fire on any position opened/closed." },
+              symbols: { type: "array", items: { type: "string" }, description: "Symbols to watch (position/news/sentiment event kinds). Use [\"*\"] to match any symbol." },
               categories: { type: "array", items: { type: "string" }, description: "RSS categories to watch: markets, companies, economy, finance (news/sentiment event kinds)" },
               symbol: { type: "string", description: "Single symbol for pe_below / fundamentals_changed event kinds" },
               threshold: { type: "number", description: "Numeric threshold for pe_below, vix_above, nifty_drop_percent event kinds" },
@@ -851,9 +850,14 @@ Examples:
             },
             required: ["type"],
           },
-          expiresAt: { type: "string", description: "ISO date string — trigger auto-expires if condition never fires by this time" },
+          prompt: { type: "string", description: "What the autonomous reasoning job should do when this trigger fires. Required for reasoning_job action types. Be specific about the analysis and decision criteria." },
+          expiresAt: { type: "string", description: "ISO date string — trigger auto-expires if condition never fires by this time (not applicable to cron triggers)" },
+          tradingDaysOnly: { type: "boolean", description: "If true, skip NSE holidays and weekends. Primarily for cron triggers." },
+          staleAfterMs: { type: "number", description: "For cron/time triggers: how many ms after the scheduled time the job is considered stale and should be skipped. Max 7200000 (2 hours)." },
+          recurring: { type: "boolean", description: "For code/llm/event triggers: if true, re-arms after firing (combined with cooldownMs to prevent spam)" },
+          cooldownMs: { type: "number", description: "For recurring code/llm/event triggers: minimum ms between firings" },
           strategy_id: { type: "string", description: "Optional strategy ID to link this trigger to a strategy" },
-          context: { type: "string", description: "Optional inline context/goal for the reasoning job — describe what you want it to do and why. Always set this for one-off triggers without a strategy, and use it to add specifics even when a strategy is linked." },
+          context: { type: "string", description: "Optional inline context/goal for the reasoning job (in addition to prompt). Useful for adding strategy-specific hints." },
         },
         required: ["name", "scope", "watchSymbols", "condition", "action"],
       },
@@ -861,22 +865,123 @@ Examples:
     handler: async (args) => {
       // Hard-order triggers are intercepted in chat.ts before this handler runs
       const { randomUUID } = await import("crypto");
+      const conditionArgs = args.condition as Record<string, unknown>;
+
+      // Validate and compute nextFireAt for cron triggers
+      let nextFireAt: string | undefined;
+      if (conditionArgs.mode === "time" && conditionArgs.cron) {
+        try {
+          parseExpression(conditionArgs.cron as string, { tz: "Asia/Kolkata" });
+        } catch (err) {
+          return `Error: Invalid cron expression "${conditionArgs.cron}": ${err instanceof Error ? err.message : String(err)}`;
+        }
+        const { computeNextRunAt, computeNextTradingRunAt } = await import("./heartbeat/cron-utils.js");
+        const tradingDaysOnly = args.tradingDaysOnly as boolean | undefined ?? false;
+        const now = new Date();
+        nextFireAt = tradingDaysOnly
+          ? computeNextTradingRunAt(conditionArgs.cron as string, now)
+          : computeNextRunAt(conditionArgs.cron as string, now);
+      }
+
+      const MAX_STALE_MS = 2 * 60 * 60 * 1000;
+      const staleAfterMs = args.staleAfterMs != null
+        ? Math.min(args.staleAfterMs as number, MAX_STALE_MS)
+        : undefined;
+
+      const actionArgs = args.action as Record<string, unknown>;
+      const action = {
+        type: actionArgs.type as string,
+        ...(actionArgs.type === "hard_order" ? { tradeArgs: actionArgs.tradeArgs as TradeArgs } : {}),
+        ...(args.prompt ? { prompt: args.prompt as string } : {}),
+      };
+
       const trigger = {
         id: randomUUID(),
         name: args.name as string,
         scope: args.scope as "symbol" | "market" | "portfolio",
         watchSymbols: args.watchSymbols as string[],
         condition: args.condition as { mode: "code"; expression: string } | { mode: "llm"; description: string },
-        action: args.action as { type: "reasoning_job" } | { type: "hard_order"; tradeArgs: TradeArgs },
+        action: action as { type: "reasoning_job"; prompt?: string } | { type: "hard_order"; tradeArgs: TradeArgs },
         expiresAt: args.expiresAt as string | undefined,
         createdAt: new Date().toISOString(),
         active: true,
         status: "active" as const,
         ...(args.strategy_id ? { strategyId: args.strategy_id as string } : {}),
         ...(args.context ? { context: args.context as string } : {}),
+        ...(args.tradingDaysOnly != null ? { tradingDaysOnly: args.tradingDaysOnly as boolean } : {}),
+        ...(staleAfterMs != null ? { staleAfterMs } : {}),
+        ...(args.recurring != null ? { recurring: args.recurring as boolean } : {}),
+        ...(args.cooldownMs != null ? { cooldownMs: args.cooldownMs as number } : {}),
+        ...(nextFireAt ? { nextFireAt } : {}),
       };
       await store.upsert(trigger);
-      return JSON.stringify({ success: true, triggerId: trigger.id, name: trigger.name });
+      return JSON.stringify({
+        success: true,
+        triggerId: trigger.id,
+        name: trigger.name,
+        ...(nextFireAt ? { nextFireAt } : {}),
+      });
+    },
+  };
+}
+
+export function createPauseTriggerTool(store: TriggerStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "pause_trigger",
+      description: "Pause an active trigger (especially cron triggers) so it no longer fires. The trigger can be resumed later.",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Trigger ID to pause" },
+        },
+        required: ["id"],
+      },
+    },
+    handler: async (args) => {
+      const { id } = args as { id: string };
+      const trigger = await store.get(id);
+      if (!trigger) return `Error: Trigger "${id}" not found`;
+      if (trigger.status !== "active") return `Error: Trigger "${id}" is not active (status: ${trigger.status})`;
+      await store.setStatus(id, "paused");
+      return `Trigger "${trigger.name}" paused.`;
+    },
+  };
+}
+
+export function createResumeTriggerTool(store: TriggerStore): ToolDefinition {
+  return {
+    requiresApproval: false,
+    definition: {
+      name: "resume_trigger",
+      description: "Resume a paused trigger. For cron triggers, recomputes nextFireAt from now.",
+      input_schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Trigger ID to resume" },
+        },
+        required: ["id"],
+      },
+    },
+    handler: async (args) => {
+      const { id } = args as { id: string };
+      const trigger = await store.get(id);
+      if (!trigger) return `Error: Trigger "${id}" not found`;
+      if (trigger.status !== "paused") return `Error: Trigger "${id}" is not paused (status: ${trigger.status})`;
+      const cond = trigger.condition as { mode: string; cron?: string };
+      if (cond.cron) {
+        const { computeNextRunAt, computeNextTradingRunAt } = await import("./heartbeat/cron-utils.js");
+        const now = new Date();
+        const nextFireAt = trigger.tradingDaysOnly
+          ? computeNextTradingRunAt(cond.cron, now)
+          : computeNextRunAt(cond.cron, now);
+        await store.updateNextFireAt(id, nextFireAt, undefined);
+        await store.setStatus(id, "active");
+        return `Trigger "${trigger.name}" resumed. Next fire: ${nextFireAt}`;
+      }
+      await store.setStatus(id, "active");
+      return `Trigger "${trigger.name}" resumed.`;
     },
   };
 }
@@ -911,7 +1016,7 @@ export function createListTriggersTool(store: TriggerStore): ToolDefinition {
     requiresApproval: false,
     definition: {
       name: "list_triggers",
-      description: "List all currently active triggers.",
+      description: "List all active and paused triggers.",
       input_schema: {
         type: "object",
         properties: {},
@@ -919,223 +1024,72 @@ export function createListTriggersTool(store: TriggerStore): ToolDefinition {
       },
     },
     handler: async () => {
-      const triggers = await store.list({ status: "active" });
+      const triggers = await store.list({ status: ["active", "paused"] });
       return JSON.stringify(triggers, null, 2);
     },
   };
 }
 
-// ── SCHEDULE TOOLS ────────────────────────────────────────────────────────────
-
-export function createRegisterScheduleTool(store: ScheduleStore): ToolDefinition {
+export function createGetTriggerRunsTool(store: TriggerAuditStore): ToolDefinition {
   return {
     requiresApproval: false,
     definition: {
-      name: "register_schedule",
-      description: "Register a recurring scheduled LLM run that fires at a cron interval. Use this to set up automated market analysis tasks like premarket scans.",
+      name: "get_trigger_runs",
+      description: "Get recent run history for triggers. Use this when the user asks what happened when a trigger fired, whether it ran, or what trades it queued.",
       input_schema: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Short name for the schedule (e.g. 'Premarket Scan')" },
-          description: { type: "string", description: "What this schedule does" },
-          cronExpression: { type: "string", description: "5-field cron expression in IST (e.g. '15 9 * * 1-5' for 9:15am Mon-Fri)" },
-          tradingDaysOnly: { type: "boolean", description: "If true, skip NSE holidays and weekends" },
-          prompt: { type: "string", description: "The instruction for the LLM when this schedule fires (e.g. 'Read latest news, find intraday opportunities, queue promising trades for approval')" },
-          strategy_id: { type: "string", description: "Optional strategy ID to link this schedule to a strategy" },
-          staleAfterMs: { type: "number", description: "How many milliseconds after the scheduled time the job is considered stale and should be skipped. Choose based on the cron cadence and task urgency — e.g. 90000 for a per-minute scan, 600000 for a daily market-open task. Max enforced server-side: 7200000 (2 hours)." },
-        },
-        required: ["name", "description", "cronExpression", "tradingDaysOnly", "prompt"],
-      },
-    },
-    handler: async (args) => {
-      const { computeNextRunAt, computeNextTradingRunAt } = await import("./scheduler/service.js");
-      const { randomUUID } = await import("crypto");
-
-      const { name, description, cronExpression, tradingDaysOnly, prompt } = args as {
-        name: string; description: string; cronExpression: string; tradingDaysOnly: boolean; prompt: string;
-      };
-      const MAX_STALE_MS = 2 * 60 * 60 * 1000; // 2 hours
-      const staleAfterMs = args.staleAfterMs != null
-        ? Math.min(args.staleAfterMs as number, MAX_STALE_MS)
-        : undefined;
-
-      // Validate cron expression
-      try {
-        parseExpression(cronExpression, { tz: "Asia/Kolkata" });
-      } catch (err) {
-        return `Error: Invalid cron expression "${cronExpression}": ${err instanceof Error ? err.message : String(err)}`;
-      }
-
-      const now = new Date();
-      const nextRunAt = tradingDaysOnly
-        ? computeNextTradingRunAt(cronExpression, now)
-        : computeNextRunAt(cronExpression, now);
-
-      const schedule = {
-        id: randomUUID(),
-        name,
-        description,
-        cronExpression,
-        tradingDaysOnly,
-        prompt,
-        status: "active" as const,
-        nextRunAt,
-        createdAt: now.toISOString(),
-        ...(args.strategy_id ? { strategyId: args.strategy_id as string } : {}),
-        ...(staleAfterMs != null ? { staleAfterMs } : {}),
-      };
-
-      await store.upsert(schedule);
-      return `Schedule "${name}" registered (id: ${schedule.id}). Next run: ${nextRunAt}`;
-    },
-  };
-}
-
-export function createPauseScheduleTool(store: ScheduleStore): ToolDefinition {
-  return {
-    requiresApproval: false,
-    definition: {
-      name: "pause_schedule",
-      description: "Pause an active schedule so it no longer fires.",
-      input_schema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "Schedule ID to pause" },
-        },
-        required: ["id"],
-      },
-    },
-    handler: async (args) => {
-      const { id } = args as { id: string };
-      const schedule = await store.get(id);
-      if (!schedule) return `Error: Schedule "${id}" not found`;
-      await store.setStatus(id, "paused");
-      return `Schedule "${schedule.name}" paused.`;
-    },
-  };
-}
-
-export function createResumeScheduleTool(store: ScheduleStore): ToolDefinition {
-  return {
-    requiresApproval: false,
-    definition: {
-      name: "resume_schedule",
-      description: "Resume a paused schedule. Recomputes nextRunAt from now.",
-      input_schema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "Schedule ID to resume" },
-        },
-        required: ["id"],
-      },
-    },
-    handler: async (args) => {
-      const { computeNextRunAt, computeNextTradingRunAt } = await import("./scheduler/service.js");
-      const { id } = args as { id: string };
-      const schedule = await store.get(id);
-      if (!schedule) return `Error: Schedule "${id}" not found`;
-      const now = new Date();
-      const nextRunAt = schedule.tradingDaysOnly
-        ? computeNextTradingRunAt(schedule.cronExpression, now)
-        : computeNextRunAt(schedule.cronExpression, now);
-      await store.setStatus(id, "active");
-      await store.updateNextRunAt(id, nextRunAt);
-      return `Schedule "${schedule.name}" resumed. Next run: ${nextRunAt}`;
-    },
-  };
-}
-
-export function createListSchedulesTool(store: ScheduleStore): ToolDefinition {
-  return {
-    requiresApproval: false,
-    definition: {
-      name: "list_schedules",
-      description: "List all active (non-deleted) schedules.",
-      input_schema: {
-        type: "object",
-        properties: {},
-      },
-    },
-    handler: async () => {
-      const schedules = await store.list();
-      if (schedules.length === 0) return "No schedules found.";
-      return JSON.stringify(schedules, null, 2);
-    },
-  };
-}
-
-export function createDeleteScheduleTool(store: ScheduleStore): ToolDefinition {
-  return {
-    requiresApproval: false,
-    definition: {
-      name: "delete_schedule",
-      description: "Delete a schedule permanently.",
-      input_schema: {
-        type: "object",
-        properties: {
-          id: { type: "string", description: "Schedule ID to delete" },
-        },
-        required: ["id"],
-      },
-    },
-    handler: async (args) => {
-      const { id } = args as { id: string };
-      const schedule = await store.get(id);
-      if (!schedule) return `Error: Schedule "${id}" not found`;
-      await store.setStatus(id, "deleted");
-      return `Schedule "${schedule.name}" deleted.`;
-    },
-  };
-}
-
-export function createGetScheduleRunsTool(store: ScheduleRunStore): ToolDefinition {
-  return {
-    requiresApproval: false,
-    definition: {
-      name: "get_schedule_runs",
-      description: "Get recent run history for scheduled jobs. Use this when the user asks what a scheduled task found, whether it ran, or what trades it queued.",
-      input_schema: {
-        type: "object",
-        properties: {
-          schedule_name: { type: "string", description: "Filter by schedule name (case-insensitive substring match). Omit to return runs across all schedules." },
+          trigger_name: { type: "string", description: "Filter by trigger name (case-insensitive substring match). Omit to return runs across all triggers." },
+          trigger_id: { type: "string", description: "Filter by exact trigger ID." },
           limit: { type: "number", description: "Number of runs to return (default 5, max 20)" },
         },
       },
     },
     handler: async (args) => {
-      const { schedule_name, limit } = args as { schedule_name?: string; limit?: number };
+      const { trigger_name, trigger_id, limit } = args as { trigger_name?: string; trigger_id?: string; limit?: number };
       const cap = Math.min(limit ?? 5, 20);
-      let runs = await store.list(50);
+      let entries = await store.list();
 
-      if (schedule_name) {
-        const needle = schedule_name.toLowerCase();
-        runs = runs.filter(r => r.scheduleName?.toLowerCase().includes(needle));
+      if (trigger_id) {
+        entries = entries.filter(e => e.triggerId === trigger_id);
+      } else if (trigger_name) {
+        const needle = trigger_name.toLowerCase();
+        entries = entries.filter(e => e.triggerName?.toLowerCase().includes(needle));
       }
 
-      runs = runs.slice(0, cap);
+      entries = entries.slice(0, cap);
 
-      if (runs.length === 0) {
-        return schedule_name
-          ? `No runs found for schedule matching "${schedule_name}".`
-          : "No schedule runs recorded yet.";
+      if (entries.length === 0) {
+        return trigger_name || trigger_id
+          ? `No runs found for the specified trigger.`
+          : "No trigger runs recorded yet.";
       }
 
-      return runs.map(r => {
-        const startedAt = r.startedAt ? new Date(r.startedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" }) : "unknown time";
-        const durationMs = new Date(r.completedAt).getTime() - new Date(r.startedAt).getTime();
-        const duration = durationMs < 1000 ? `${durationMs}ms` : `${Math.round(durationMs / 1000)}s`;
-
+      return entries.map(e => {
+        const firedAt = new Date(e.firedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" });
         let outcomeStr: string;
-        if (r.outcome.type === "completed") {
-          const n = r.outcome.approvalIds.length;
-          outcomeStr = `completed — ${r.outcome.summary}${n > 0 ? ` (${n} approval${n > 1 ? "s" : ""} queued)` : ""}`;
-        } else if (r.outcome.type === "no_action") {
-          outcomeStr = `no action — ${r.outcome.reason}`;
-        } else {
-          outcomeStr = `error — ${r.outcome.message}`;
+        switch (e.outcome.type) {
+          case "hard_order_placed":
+            outcomeStr = `hard order placed (orderId: ${e.outcome.orderId})`;
+            break;
+          case "hard_order_failed":
+            outcomeStr = `hard order failed: ${e.outcome.error}`;
+            break;
+          case "reasoning_job_queued":
+            outcomeStr = e.outcome.approvalId
+              ? `reasoning job — queued approval ${e.outcome.approvalId}`
+              : "reasoning job — no approval queued";
+            break;
+          case "reasoning_job_completed":
+            outcomeStr = `reasoning job completed — ${e.outcome.summary}${e.outcome.approvalIds.length > 0 ? ` (${e.outcome.approvalIds.length} approval(s))` : ""}, took ${Math.round(e.outcome.durationMs / 1000)}s`;
+            break;
+          case "reasoning_job_no_action":
+            outcomeStr = `no action — ${e.outcome.reason}`;
+            break;
+          default:
+            outcomeStr = "unknown outcome";
         }
-
-        return `Schedule: "${r.scheduleName ?? r.scheduleId}"  (${startedAt} IST)\nOutcome: ${outcomeStr}\nDuration: ${duration}`;
+        return `Trigger: "${e.triggerName}"  (${firedAt} IST)\nOutcome: ${outcomeStr}`;
       }).join("\n\n");
     },
   };
@@ -1146,7 +1100,6 @@ export function createGetScheduleRunsTool(store: ScheduleRunStore): ToolDefiniti
 export function createStrategyTools(
   store: StrategyStore,
   triggerStore?: TriggerStore,
-  scheduleStore?: ScheduleStore,
   tradeStore?: TradeStore,
 ): ToolDefinition[] {
   const createStrategy: ToolDefinition = {
@@ -1155,7 +1108,7 @@ export function createStrategyTools(
       name: "create_strategy",
       description: `Create a named trading strategy with a capital allocation and a written plan.
 
-The plan field should describe the full trading policy: objectives, entry/exit signals, position sizing, and risk rules. After creating a strategy, analyze the plan text and propose concrete triggers and schedules that would implement it. Describe each one, ask the user to confirm, and if confirmed call register_trigger/register_schedule linked to this strategy's id.`,
+The plan field should describe the full trading policy: objectives, entry/exit signals, position sizing, and risk rules. After creating a strategy, analyze the plan text and propose concrete triggers that would implement it (use register_trigger with cron condition for recurring analysis). Describe each one, ask the user to confirm, and if confirmed call register_trigger linked to this strategy's id.`,
       input_schema: {
         type: "object",
         properties: {
@@ -1280,24 +1233,17 @@ The plan field should describe the full trading policy: objectives, entry/exit s
         }
       }
 
-      // Cascade: cancel active triggers + pause active/paused schedules
+      // Cascade: cancel active and paused triggers
       let triggersCancelled = 0;
-      let schedulesPaused = 0;
       if (triggerStore) {
-        const activeTriggers = await triggerStore.list({ status: "active" });
-        const linked = activeTriggers.filter(t => t.strategyId === strategy_id);
+        const linkedTriggers = await triggerStore.list({ status: ["active", "paused"] });
+        const linked = linkedTriggers.filter(t => t.strategyId === strategy_id);
         await Promise.all(linked.map(t => triggerStore.setStatus(t.id, "cancelled")));
         triggersCancelled = linked.length;
       }
-      if (scheduleStore) {
-        const activeSchedules = await scheduleStore.list({ status: ["active", "paused"] });
-        const linked = activeSchedules.filter(s => s.strategyId === strategy_id);
-        await Promise.all(linked.map(s => scheduleStore.setStatus(s.id, "deleted")));
-        schedulesPaused = linked.length;
-      }
 
       await store.setStatus(strategy_id, "archived");
-      return JSON.stringify({ success: true, strategyId: strategy_id, status: "archived", triggersCancelled, schedulesDeleted: schedulesPaused });
+      return JSON.stringify({ success: true, strategyId: strategy_id, status: "archived", triggersCancelled });
     },
   };
 

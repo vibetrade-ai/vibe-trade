@@ -18,13 +18,19 @@ The key design constraints:
 
 ## Decisions
 
-### 1. Two condition evaluation modes: code and LLM
+### 1. Four condition evaluation modes: code, LLM, time, and event
 
 ```typescript
 type TriggerCondition =
-  | { mode: "code"; expression: string }   // JS expression; zero LLM cost per tick
-  | { mode: "llm";  description: string }  // Haiku evaluates natural language
+  | { mode: "code";  expression: string }   // JS expression; zero LLM cost per tick
+  | { mode: "llm";   description: string }  // Haiku evaluates natural language
+  | { mode: "time";  at?: string; cron?: string; fireAt?: string } // one-shot or recurring
+  | { mode: "event"; kind: EventKind; ... } // structured event kinds (see ADR-009)
 ```
+
+`time` mode supports both one-shot (`at`) and recurring (`cron`) variants. See ADR-011 for details on cron trigger lifecycle.
+
+`event` mode adds 12 typed, enumerable kinds for position lifecycle, news/sentiment, macro volatility, and valuation thresholds. See ADR-009.
 
 **Code mode** runs the expression inside `vm.runInNewContext` with a 500ms timeout against a sandboxed snapshot object. The sandbox exposes `quotes`, `positions`, `funds`, `nifty50`, `banknifty` — exactly the vocabulary of `SystemSnapshot`. Expression must return `true` to fire.
 
@@ -69,10 +75,10 @@ In both cases, the user sees exactly what order will be placed, under what condi
 ### 4. Triggers are soft-deleted (full status lifecycle)
 
 ```typescript
-type TriggerStatus = "active" | "fired" | "expired" | "cancelled";
+type TriggerStatus = "active" | "fired" | "expired" | "cancelled" | "paused";
 ```
 
-Triggers are never removed from `triggers.json`. They transition through statuses. `TriggerStore.list()` defaults to `status === "active"`. Full history is accessible via the audit store.
+Triggers are never removed from `triggers.json`. They transition through statuses. `TriggerStore.list()` defaults to `status === "active"`. Full history is accessible via the audit store. Cron triggers use `"paused"` to suspend without cancellation; resuming recomputes `nextFireAt`.
 
 `firedAt` and `outcomeId` (Dhan order ID or approval ID) are written on fire, creating a link from trigger → action → outcome.
 
@@ -196,17 +202,9 @@ Frontend (10s poll)
 
 ---
 
-## Future: Scheduler
+## Cron triggers (see ADR-011)
 
-The scheduler sits above the heartbeat. It creates triggers on a schedule (e.g., "every morning at 9:30, register a portfolio review trigger"). The heartbeat does not change — it simply sees new triggers appearing in the store.
-
-```
-Scheduler (cron-like, future)
-    ↓  registers Trigger records at scheduled time
-Heartbeat (evaluates conditions every 60s)
-    ↓  condition met → fires → consumed
-Action (hard order or reasoning job)
-```
+Cron-based repeating runs are modelled as `time/cron` triggers — no separate scheduler. A cron trigger stays `"active"` after firing; its `nextFireAt` advances. The heartbeat handles both one-shot and cron time triggers in the same tick loop.
 
 ---
 

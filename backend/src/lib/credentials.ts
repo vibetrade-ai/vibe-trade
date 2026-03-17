@@ -12,14 +12,13 @@ interface CredentialsMap {
 
 interface ServiceRefs {
   heartbeat: { setDhanClient(c: DhanClient): void } | null;
-  scheduler: { setDhanClient(c: DhanClient): void } | null;
 }
 
 class AppCredentialsStore {
   private map: CredentialsMap = {};
   private dhanClient: DhanClient | null = null;
   private anthropicClient: Anthropic | null = null;
-  private services: ServiceRefs = { heartbeat: null, scheduler: null };
+  private services: ServiceRefs = { heartbeat: null };
   private store: CredentialsStore | null = null;
 
   init(store: CredentialsStore): void {
@@ -98,7 +97,6 @@ class AppCredentialsStore {
   private propagateClients(): void {
     if (this.dhanClient) {
       this.services.heartbeat?.setDhanClient(this.dhanClient);
-      this.services.scheduler?.setDhanClient(this.dhanClient);
     }
   }
 }

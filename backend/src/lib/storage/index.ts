@@ -8,8 +8,6 @@ export { type MemoryStore } from "./types.js";
 export { type TriggerStore } from "./types.js";
 export { type ApprovalStore } from "./types.js";
 export { type TriggerAuditStore } from "./types.js";
-export { type ScheduleStore } from "./types.js";
-export { type ScheduleRunStore } from "./types.js";
 export { type StrategyStore } from "./types.js";
 export { type Strategy, type StrategyState, type StrategyStatus } from "./types.js";
 export { type TradeStore } from "./types.js";

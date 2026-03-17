@@ -6,8 +6,12 @@ export function evaluateTimeTriggers(triggers: Trigger[]): string[] {
   const now = Date.now();
   return triggers
     .filter(t => {
-      const cond = t.condition as { mode: "time"; fireAt: string };
-      return now >= new Date(cond.fireAt).getTime();
+      const cond = t.condition as { mode: "time"; fireAt?: string; at?: string; cron?: string };
+      // Only handle one-shot triggers (at/fireAt), not cron (handled separately)
+      if (cond.cron) return false;
+      const fireTime = cond.at ?? cond.fireAt;
+      if (!fireTime) return false;
+      return now >= new Date(fireTime).getTime();
     })
     .map(t => t.id);
 }

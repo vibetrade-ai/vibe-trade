@@ -10,6 +10,7 @@ import { getMarketStatus } from "../market-calendar.js";
 import { syncOrders } from "../order-sync.js";
 import { fetchNews } from "../news.js";
 import { getFundamentals, getVixQuote } from "../yahoo.js";
+import { computeNextRunAt, computeNextTradingRunAt, evaluateCronTriggers } from "./cron-utils.js";
 import type { PositionEntry, Trigger, EventDelta, EventCondition } from "./types.js";
 import type { Fundamentals } from "../yahoo.js";
 
@@ -152,18 +153,41 @@ export class HeartbeatService {
       await this.approvals.pruneExpired();
       await this.triggers.pruneExpired();
 
-      const activeTriggers = await this.triggers.list({ status: "active" });
-      if (activeTriggers.length === 0) {
+      const activeTriggers = await this.triggers.list({ status: ["active", "paused"] });
+      const activeOnly = activeTriggers.filter(t => t.status === "active");
+
+      if (activeOnly.length === 0) {
         console.log("[heartbeat] no active triggers, skipping snapshot");
         return;
       }
 
-      const timeTriggers  = activeTriggers.filter(t => t.condition.mode === "time");
-      const codeTriggers  = activeTriggers.filter(t => t.condition.mode === "code");
-      const llmTriggers   = activeTriggers.filter(t => t.condition.mode === "llm");
-      const eventTriggers = activeTriggers.filter(t => t.condition.mode === "event");
+      const now = new Date();
+      const timeTriggers  = activeOnly.filter(t => t.condition.mode === "time");
+      const codeTriggers  = activeOnly.filter(t => t.condition.mode === "code");
+      const llmTriggers   = activeOnly.filter(t => t.condition.mode === "llm");
+      const eventTriggers = activeOnly.filter(t => t.condition.mode === "event");
 
-      const timeFired = evaluateTimeTriggers(timeTriggers);
+      // Split time triggers: one-shot (at/fireAt) vs cron
+      const oneShotTimeTriggers = timeTriggers.filter(t => !(t.condition as { mode: "time"; cron?: string }).cron);
+      const cronTimeTriggers    = timeTriggers.filter(t => !!(t.condition as { mode: "time"; cron?: string }).cron);
+
+      const oneShotFired = evaluateTimeTriggers(oneShotTimeTriggers);
+
+      // Evaluate cron triggers
+      const { fired: cronFired, stale: cronStale } = evaluateCronTriggers(cronTimeTriggers, now);
+
+      // Advance stale cron triggers without firing
+      for (const id of cronStale) {
+        const trigger = activeOnly.find(t => t.id === id);
+        if (!trigger) continue;
+        const cron = (trigger.condition as { mode: "time"; cron: string }).cron;
+        const tradingDaysOnly = trigger.tradingDaysOnly ?? false;
+        const nextFireAt = tradingDaysOnly
+          ? computeNextTradingRunAt(cron, now)
+          : computeNextRunAt(cron, now);
+        await this.triggers.updateNextFireAt(id, nextFireAt, undefined);
+        console.log(`[heartbeat] skipping stale cron trigger "${trigger.name}", next: ${nextFireAt}`);
+      }
 
       let codeFired: string[] = [];
       let llmFired: string[] = [];
@@ -179,7 +203,7 @@ export class HeartbeatService {
         if (!isMarketActive) {
           console.log(`[heartbeat] market ${marketStatus.session} — skipping ${codeTriggers.length + llmTriggers.length + eventTriggers.length} code/llm/event trigger(s) until ${marketStatus.next_open}`);
         } else {
-          snapshot = await buildSnapshot(this.dhan, activeTriggers);
+          snapshot = await buildSnapshot(this.dhan, activeOnly);
           const delta = await this.buildEventDelta(snapshot, eventTriggers);
           [codeFired, llmFired, eventFired] = await Promise.all([
             Promise.resolve(evaluateCodeTriggers(snapshot, codeTriggers, delta)),
@@ -191,14 +215,14 @@ export class HeartbeatService {
         }
       }
 
-      const firedIds = [...new Set([...timeFired, ...codeFired, ...llmFired, ...eventFired])];
+      const firedIds = [...new Set([...oneShotFired, ...cronFired, ...codeFired, ...llmFired, ...eventFired])];
 
       if (firedIds.length > 0) {
         console.log(`[heartbeat] fired: ${firedIds.join(", ")}`);
       }
 
       const hasReasoningJob = firedIds.some(id =>
-        activeTriggers.find(t => t.id === id)?.action.type === "reasoning_job"
+        activeOnly.find(t => t.id === id)?.action.type === "reasoning_job"
       );
       if (hasReasoningJob && this.tradeStore) {
         const r = await syncOrders(this.dhan, this.tradeStore);
@@ -208,10 +232,10 @@ export class HeartbeatService {
       }
 
       for (const id of firedIds) {
-        const trigger = activeTriggers.find(t => t.id === id);
+        const trigger = activeOnly.find(t => t.id === id);
         if (!trigger) continue;
 
-        const now = new Date().toISOString();
+        const nowIso = new Date().toISOString();
 
         // If snapshot is null (only time triggers fired), build minimal snapshot
         if (!snapshot) {
@@ -219,8 +243,8 @@ export class HeartbeatService {
         }
 
         if (trigger.action.type === "hard_order") {
-          // Mark as fired immediately
-          await this.triggers.setStatus(trigger.id, "fired", { firedAt: now });
+          // Mark as fired immediately (hard orders are always one-shot)
+          await this.triggers.setStatus(trigger.id, "fired", { firedAt: nowIso });
           try {
             const tradeArgs = trigger.action.tradeArgs;
             const securityId = await getSecurityId(tradeArgs.symbol);
@@ -233,10 +257,10 @@ export class HeartbeatService {
               price: tradeArgs.price,
             });
             const orderId = (orderResult as Record<string, unknown>)["orderId"] as string ?? randomUUID();
-            await this.triggers.setStatus(trigger.id, "fired", { firedAt: now, outcomeId: orderId });
+            await this.triggers.setStatus(trigger.id, "fired", { firedAt: nowIso, outcomeId: orderId });
             await this.triggerAudit.append({
               id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-              firedAt: now, snapshotAtFire: snapshot, action: trigger.action,
+              firedAt: nowIso, snapshotAtFire: snapshot, action: trigger.action,
               outcome: { type: "hard_order_placed", orderId },
             });
             if (this.tradeStore) {
@@ -252,7 +276,7 @@ export class HeartbeatService {
                 status: "pending",
                 strategyId: trigger.strategyId,
                 note: `Auto-placed by trigger: ${trigger.name}`,
-                createdAt: now,
+                createdAt: nowIso,
               });
             }
             console.log(`[heartbeat] hard_order placed: ${orderId} for trigger ${trigger.id}`);
@@ -260,7 +284,7 @@ export class HeartbeatService {
             const error = err instanceof Error ? err.message : String(err);
             await this.triggerAudit.append({
               id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-              firedAt: now, snapshotAtFire: snapshot, action: trigger.action,
+              firedAt: nowIso, snapshotAtFire: snapshot, action: trigger.action,
               outcome: { type: "hard_order_failed", error },
             });
             console.error(`[heartbeat] hard_order failed for trigger ${trigger.id}:`, err);
@@ -271,7 +295,35 @@ export class HeartbeatService {
             console.warn(`[heartbeat] max concurrent jobs reached, skipping trigger ${trigger.id}`);
             continue;
           }
-          await this.triggers.setStatus(trigger.id, "fired", { firedAt: now });
+
+          const isCronTrigger = !!(trigger.condition as { mode: "time"; cron?: string }).cron;
+          const isRecurring = trigger.recurring === true;
+
+          if (isCronTrigger) {
+            // Cron triggers: stay active, update nextFireAt before launching
+            const cron = (trigger.condition as { mode: "time"; cron: string }).cron;
+            const tradingDaysOnly = trigger.tradingDaysOnly ?? false;
+            const nextFireAt = tradingDaysOnly
+              ? computeNextTradingRunAt(cron, now)
+              : computeNextRunAt(cron, now);
+            await this.triggers.updateNextFireAt(trigger.id, nextFireAt, nowIso);
+            console.log(`[heartbeat] cron trigger "${trigger.name}" fired, next: ${nextFireAt}`);
+          } else if (isRecurring && trigger.cooldownMs) {
+            // Recurring code/llm/event: check cooldown
+            if (trigger.lastFiredAt) {
+              const elapsed = Date.now() - new Date(trigger.lastFiredAt).getTime();
+              if (elapsed < trigger.cooldownMs) {
+                console.log(`[heartbeat] recurring trigger "${trigger.name}" in cooldown, skipping`);
+                continue;
+              }
+            }
+            // Re-arm: update lastFiredAt, keep active
+            await this.triggers.setStatus(trigger.id, "active", { lastFiredAt: nowIso });
+          } else {
+            // One-shot: mark as fired
+            await this.triggers.setStatus(trigger.id, "fired", { firedAt: nowIso });
+          }
+
           this.activeJobs++;
           console.log(`[heartbeat] reasoning job started for trigger ${trigger.id}`);
           runReasoningJob(trigger, snapshot, this.dhan, this.triggers, this.approvals, this.triggerAudit, this.memory, this.strategyStore)
@@ -280,7 +332,7 @@ export class HeartbeatService {
               console.error(`[heartbeat] reasoning job error for ${trigger.id}:`, err);
               await this.triggerAudit.append({
                 id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-                firedAt: now, snapshotAtFire: snapshot!, action: trigger.action,
+                firedAt: nowIso, snapshotAtFire: snapshot!, action: trigger.action,
                 outcome: { type: "reasoning_job_no_action", reason: `Job threw an error: ${error}` },
               }).catch(() => {});
             })

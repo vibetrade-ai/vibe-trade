@@ -1,9 +1,8 @@
-import type { DhanClient } from "../dhan/client.js";
+import type { BrokerAdapter } from "../brokers/types.js";
 import type { Trigger, SystemSnapshot, QuoteEntry, PositionEntry } from "./types.js";
 import { getMarketStatus } from "../market-calendar.js";
-import { getSecurityId } from "../dhan/instruments.js";
 
-export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Promise<SystemSnapshot> {
+export async function buildSnapshot(broker: BrokerAdapter, triggers: Trigger[]): Promise<SystemSnapshot> {
   const status = getMarketStatus();
   const capturedAt = new Date().toISOString();
   const isMarketActive = status.session === "pre_market"
@@ -16,112 +15,65 @@ export async function buildSnapshot(dhan: DhanClient, triggers: Trigger[]): Prom
   const indexNames = new Set(["NIFTY50", "BANKNIFTY", "NIFTY", "NIFTYBANK"]);
   const equitySymbols = [...watchSymbols].filter(s => s !== "*" && !indexNames.has(s.toUpperCase()));
 
-  // When market is closed, skip live quote fetches — they return stale/zero data.
-  // Positions and funds are account data and are always worth fetching.
-  const [positionsRaw, fundsRaw, equityQuotesRaw, indexQuotesRaw] = await Promise.allSettled([
-    dhan.getPositions(),
-    dhan.getFunds(),
-    isMarketActive && equitySymbols.length > 0
-      ? (async () => {
-          // Resolve security IDs for equity symbols
-          const secIdMap: Record<string, string> = {};
-          await Promise.all(equitySymbols.map(async (sym) => {
-            try { secIdMap[sym] = await getSecurityId(sym); } catch {}
-          }));
-          const ids = Object.values(secIdMap).filter(Boolean);
-          if (ids.length === 0) return null;
-          return { result: await dhan.getQuote(ids, "NSE_EQ"), secIdMap };
-        })()
-      : Promise.resolve(null),
-    isMarketActive ? dhan.getQuote(["13", "25"], "IDX_I") : Promise.resolve(null),
+  // Always fetch NIFTY50 and BANKNIFTY as index symbols
+  const allSymbolsToFetch = isMarketActive
+    ? [...equitySymbols, "NIFTY50", "BANKNIFTY"]
+    : [];
+
+  const [positionsSettled, fundsSettled, quotesSettled] = await Promise.allSettled([
+    broker.getPositions(),
+    broker.getFunds(),
+    allSymbolsToFetch.length > 0
+      ? broker.getQuote(allSymbolsToFetch)
+      : Promise.resolve([]),
   ]);
 
   // Parse quotes
   const quotes: Record<string, QuoteEntry> = {};
-
-  if (equityQuotesRaw.status === "fulfilled" && equityQuotesRaw.value) {
-    const { result, secIdMap } = equityQuotesRaw.value as { result: unknown; secIdMap: Record<string, string> };
-    const reverseMap: Record<string, string> = {};
-    for (const [sym, id] of Object.entries(secIdMap)) reverseMap[id] = sym;
-    // New format: result.data["NSE_EQ"] is an object keyed by securityId string
-    const nseEq = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.["NSE_EQ"] as Record<string, Record<string, unknown>> | undefined;
-    if (nseEq && typeof nseEq === "object") {
-      for (const [secId, q] of Object.entries(nseEq)) {
-        const symbol = reverseMap[secId] ?? secId;
-        const lp = (q["last_price"] as number) ?? 0;
-        const ohlc = q["ohlc"] as Record<string, number> | undefined;
-        const pc = ohlc?.["close"] ?? 0;
-        quotes[symbol.toUpperCase()] = {
-          symbol: symbol.toUpperCase(),
-          securityId: secId,
-          lastPrice: lp,
-          previousClose: pc,
-          changePercent: pc ? +((lp - pc) / pc * 100).toFixed(2) : 0,
-          open: ohlc?.["open"] ?? 0,
-          high: ohlc?.["high"] ?? 0,
-          low: ohlc?.["low"] ?? 0,
-        };
-      }
-    }
-  }
-
-  // Parse index quotes for NIFTY50 / BANKNIFTY
   let nifty50: QuoteEntry | null = null;
   let banknifty: QuoteEntry | null = null;
-  if (indexQuotesRaw.status === "fulfilled") {
-    // New format: result.data["IDX_I"] is an object keyed by securityId string
-    const idxData = ((indexQuotesRaw.value as Record<string, unknown>)["data"] as Record<string, unknown>)?.["IDX_I"] as Record<string, Record<string, unknown>> | undefined;
-    if (idxData && typeof idxData === "object") {
-      for (const [secId, q] of Object.entries(idxData)) {
-        const lp = (q["last_price"] as number) ?? 0;
-        const ohlc = q["ohlc"] as Record<string, number> | undefined;
-        const pc = ohlc?.["close"] ?? 0;
-        const entry: QuoteEntry = {
-          symbol: secId === "13" ? "NIFTY50" : "BANKNIFTY",
-          securityId: secId,
-          lastPrice: lp,
-          previousClose: pc,
-          changePercent: pc ? +((lp - pc) / pc * 100).toFixed(2) : 0,
-          open: ohlc?.["open"] ?? 0,
-          high: ohlc?.["high"] ?? 0,
-          low: ohlc?.["low"] ?? 0,
-        };
-        if (secId === "13") nifty50 = entry;
-        else if (secId === "25") banknifty = entry;
-      }
+
+  if (quotesSettled.status === "fulfilled") {
+    for (const q of quotesSettled.value) {
+      const entry: QuoteEntry = {
+        symbol: q.symbol.toUpperCase(),
+        securityId: "",
+        lastPrice: q.lastPrice,
+        previousClose: q.previousClose,
+        changePercent: q.changePercent,
+        open: q.open,
+        high: q.high,
+        low: q.low,
+      };
+      quotes[entry.symbol] = entry;
+      if (entry.symbol === "NIFTY50") nifty50 = entry;
+      else if (entry.symbol === "BANKNIFTY") banknifty = entry;
     }
   }
 
   // Parse positions
   const positions: PositionEntry[] = [];
-  if (positionsRaw.status === "fulfilled") {
-    const posData = positionsRaw.value as Array<Record<string, unknown>>;
-    if (Array.isArray(posData)) {
-      for (const p of posData) {
-        const qty = (p["netQty"] as number) ?? 0;
-        if (qty === 0) continue;
-        const avg = (p["costPrice"] as number) ?? (p["avgCostPrice"] as number) ?? 0;
-        const lp = (p["lastTradedPrice"] as number) ?? (p["ltp"] as number) ?? 0;
-        const pnl = (lp - avg) * qty;
-        positions.push({
-          symbol: (p["tradingSymbol"] as string) ?? "",
-          quantity: qty,
-          avgCostPrice: avg,
-          lastPrice: lp,
-          unrealizedPnl: +pnl.toFixed(2),
-          pnlPercent: avg ? +((lp - avg) / avg * 100).toFixed(2) : 0,
-        });
-      }
+  if (positionsSettled.status === "fulfilled") {
+    for (const p of positionsSettled.value) {
+      positions.push({
+        symbol: p.symbol,
+        quantity: p.quantity,
+        avgCostPrice: p.avgEntryPrice,
+        lastPrice: p.lastPrice,
+        unrealizedPnl: p.unrealizedPnl,
+        pnlPercent: p.avgEntryPrice
+          ? +((p.lastPrice - p.avgEntryPrice) / p.avgEntryPrice * 100).toFixed(2)
+          : 0,
+      });
     }
   }
 
   // Parse funds
   let funds: { availableBalance: number; usedMargin: number } | null = null;
-  if (fundsRaw.status === "fulfilled" && fundsRaw.value) {
-    const f = fundsRaw.value as Record<string, unknown>;
+  if (fundsSettled.status === "fulfilled") {
     funds = {
-      availableBalance: (f["availabelBalance"] as number) ?? (f["availableBalance"] as number) ?? 0,
-      usedMargin: (f["utilizedAmount"] as number) ?? (f["usedMargin"] as number) ?? 0,
+      availableBalance: fundsSettled.value.cash.available,
+      usedMargin: fundsSettled.value.cash.used,
     };
   }
 

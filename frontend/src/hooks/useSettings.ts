@@ -13,6 +13,7 @@ interface SettingsState {
   loading: boolean;
   allConfigured: boolean;
   status: CredentialStatus;
+  broker: string;
 }
 
 export function useSettings() {
@@ -20,14 +21,15 @@ export function useSettings() {
     loading: true,
     allConfigured: false,
     status: { ANTHROPIC_API_KEY: false, DHAN_ACCESS_TOKEN: false, DHAN_CLIENT_ID: false },
+    broker: "dhan",
   });
 
   const refresh = useCallback(async () => {
     try {
       const res = await fetch(`${getBackendHttpUrl()}/api/settings`);
       if (!res.ok) return;
-      const data = (await res.json()) as { status: CredentialStatus; allConfigured: boolean };
-      setState({ loading: false, allConfigured: data.allConfigured, status: data.status });
+      const data = (await res.json()) as { status: CredentialStatus; allConfigured: boolean; broker?: string };
+      setState({ loading: false, allConfigured: data.allConfigured, status: data.status, broker: data.broker ?? "dhan" });
     } catch {
       setState((prev) => ({ ...prev, loading: false }));
     }

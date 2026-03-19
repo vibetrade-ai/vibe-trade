@@ -1,28 +1,28 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { parseExpression } from "cron-parser";
-import { DhanClient } from "./dhan/client.js";
+import type { BrokerAdapter, BrokerCapabilities, CandleInterval } from "./brokers/types.js";
 import type { MemoryStore, TriggerStore, TriggerAuditStore, StrategyStore, TradeStore } from "./storage/index.js";
 import type { TradeArgs } from "./heartbeat/types.js";
 import {
-  getSecurityId,
-  getSecurityIds,
   searchInstruments,
+  isEtf,
+} from "./brokers/dhan/instruments.js";
+import {
   getIndexConstituents,
   getIndexConstituentInfo,
-  isEtf,
-} from "./dhan/instruments.js";
-import { fetchCandles, resolveInstrument } from "./dhan/candles.js";
+} from "./market-data/nse.js";
 import { computeIndicators } from "./indicators.js";
 import { getFundamentals, getEtfInfo } from "./yahoo.js";
 import { fetchNews } from "./news.js";
 import { getMarketStatus, isTradingDay, getUpcomingHolidays } from "./market-calendar.js";
-import { parseOrderStatus, syncOrders } from "./order-sync.js";
+import { syncOrders } from "./brokers/dhan/order-sync.js";
 import { computeOpenPositions } from "./trade-utils.js";
 
 export interface ToolDefinition {
   definition: Anthropic.Tool;
   requiresApproval: boolean;
-  handler: (args: Record<string, unknown>, client: DhanClient) => Promise<string>;
+  requiresCapability?: keyof BrokerCapabilities;
+  handler: (args: Record<string, unknown>, broker: BrokerAdapter) => Promise<string>;
 }
 
 function describeApproval(tool: string, args: Record<string, unknown>): string {
@@ -58,11 +58,10 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbols"],
       },
     },
-    handler: async (args, client) => {
+    handler: async (args, broker) => {
       const symbols = args.symbols as string[];
-      const secIds = await getSecurityIds(symbols);
-      const result = await client.getQuote(Object.values(secIds));
-      return JSON.stringify(result, null, 2);
+      const quotes = await broker.getQuote(symbols);
+      return JSON.stringify(quotes, null, 2);
     },
   },
 
@@ -83,13 +82,9 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["index"],
       },
     },
-    handler: async (args, client) => {
-      const { securityId, exchangeSegment } = await resolveInstrument(args.index as string);
-      if (exchangeSegment !== "IDX_I") {
-        return JSON.stringify({ error: `'${args.index}' is not a recognised index symbol.` });
-      }
-      const result = await client.getQuote([securityId], "IDX_I");
-      return JSON.stringify(result, null, 2);
+    handler: async (args, broker) => {
+      const quotes = await broker.getQuote([args.index as string]);
+      return JSON.stringify(quotes, null, 2);
     },
   },
 
@@ -110,7 +105,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["index"],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const constituents = await getIndexConstituentInfo(args.index as string);
       return JSON.stringify({ index: (args.index as string).toUpperCase(), count: constituents.length, constituents }, null, 2);
     },
@@ -120,16 +115,16 @@ export const TOOLS: Record<string, ToolDefinition> = {
     requiresApproval: false,
     definition: {
       name: "get_positions",
-      description: "Get all open positions in the Dhan account.",
+      description: "Get all open positions in the brokerage account.",
       input_schema: {
         type: "object",
         properties: {},
         required: [],
       },
     },
-    handler: async (_args, client) => {
-      const result = await client.getPositions();
-      return JSON.stringify(result, null, 2);
+    handler: async (_args, broker) => {
+      const positions = await broker.getPositions();
+      return JSON.stringify(positions, null, 2);
     },
   },
 
@@ -137,16 +132,16 @@ export const TOOLS: Record<string, ToolDefinition> = {
     requiresApproval: false,
     definition: {
       name: "get_funds",
-      description: "Get available balance, used margin, and day P&L for the Dhan account.",
+      description: "Get available balance, used margin, and day P&L for the brokerage account.",
       input_schema: {
         type: "object",
         properties: {},
         required: [],
       },
     },
-    handler: async (_args, client) => {
-      const result = await client.getFunds();
-      return JSON.stringify(result, null, 2);
+    handler: async (_args, broker) => {
+      const funds = await broker.getFunds();
+      return JSON.stringify(funds, null, 2);
     },
   },
 
@@ -154,16 +149,16 @@ export const TOOLS: Record<string, ToolDefinition> = {
     requiresApproval: false,
     definition: {
       name: "get_orders",
-      description: "Get today's full order book from the Dhan account.",
+      description: "Get today's full order book from the brokerage account.",
       input_schema: {
         type: "object",
         properties: {},
         required: [],
       },
     },
-    handler: async (_args, client) => {
-      const result = await client.getOrders();
-      return JSON.stringify(result, null, 2);
+    handler: async (_args, broker) => {
+      const orders = await broker.getOrders();
+      return JSON.stringify(orders, null, 2);
     },
   },
 
@@ -209,41 +204,35 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbol", "transaction_type", "quantity", "order_type"],
       },
     },
-    handler: async (args, client) => {
-      const symbol = args.symbol as string;
-      const securityId = await getSecurityId(symbol);
-      const placeResult = await client.placeOrder({
+    handler: async (args, broker) => {
+      const symbol = (args.symbol as string).toUpperCase();
+      const placeResult = await broker.placeOrder({
         symbol,
-        securityId,
-        transactionType: args.transaction_type as "BUY" | "SELL",
+        side: args.transaction_type as "BUY" | "SELL",
         quantity: args.quantity as number,
         orderType: args.order_type as "MARKET" | "LIMIT",
+        productType: "INTRADAY",
         price: args.price as number | undefined,
-      }) as Record<string, unknown>;
-      const orderId = String(placeResult["orderId"] ?? "");
-
-      if (!orderId) return JSON.stringify(placeResult, null, 2);
+      });
+      const orderId = placeResult.orderId;
+      if (!orderId) return JSON.stringify(placeResult);
 
       try {
         await new Promise(r => setTimeout(r, 1500));
-        const orderDetail = await client.getOrderById(orderId) as Record<string, unknown>;
-        const parsed = parseOrderStatus(orderDetail);
-
+        const order = await broker.getOrderById(orderId);
         const message =
-          parsed.tradeStatus === "filled"    ? `Order filled at ₹${parsed.executedPrice}`
-          : parsed.tradeStatus === "rejected" ? `Order REJECTED: ${parsed.rejectionReason}`
-          : `Order accepted, awaiting confirmation (status: ${parsed.dhanStatus})`;
-
+          order.status === "FILLED" ? `Order filled at ₹${order.price}`
+          : order.status === "REJECTED" ? `Order REJECTED: ${order.statusMessage}`
+          : `Order accepted, awaiting confirmation (status: ${order.status})`;
         return JSON.stringify({
           orderId,
-          currentStatus: parsed.dhanStatus,
-          executedPrice: parsed.executedPrice ?? null,
-          rejectionReason: parsed.rejectionReason ?? null,
-          filledAt: parsed.filledAt ?? null,
+          currentStatus: order.status,
+          executedPrice: order.price ?? null,
+          rejectionReason: order.statusMessage ?? null,
+          filledAt: order.updatedAt.toISOString(),
           message,
         }, null, 2);
       } catch {
-        // Poll failed — return original Dhan response unchanged
         return JSON.stringify(placeResult, null, 2);
       }
     },
@@ -259,15 +248,15 @@ export const TOOLS: Record<string, ToolDefinition> = {
         properties: {
           order_id: {
             type: "string",
-            description: "The Dhan order ID to cancel",
+            description: "The order ID to cancel",
           },
         },
         required: ["order_id"],
       },
     },
-    handler: async (args, client) => {
-      const result = await client.cancelOrder(args.order_id as string);
-      return JSON.stringify(result, null, 2);
+    handler: async (args, broker) => {
+      await broker.cancelOrder(args.order_id as string);
+      return JSON.stringify({ success: true, orderId: args.order_id });
     },
   },
 
@@ -275,10 +264,11 @@ export const TOOLS: Record<string, ToolDefinition> = {
 
   get_historical_data: {
     requiresApproval: false,
+    requiresCapability: "supportsHistoricalData",
     definition: {
       name: "get_historical_data",
       description:
-        "Get historical OHLCV candles for an NSE equity, ETF, or index symbol (e.g. NIFTY50, BANKNIFTY, NIFTYBEES). Supports intraday (1/5/15/60 min) and daily intervals.",
+        "Get historical OHLCV candles for an NSE equity, ETF, or index symbol (e.g. NIFTY50, BANKNIFTY, NIFTYBEES). Supports intraday (1m/5m/15m/1h) and daily intervals.",
       input_schema: {
         type: "object",
         properties: {
@@ -288,8 +278,8 @@ export const TOOLS: Record<string, ToolDefinition> = {
           },
           interval: {
             type: "string",
-            enum: ["1", "5", "15", "25", "60", "D"],
-            description: "Candle interval. '1','5','15','25','60' for intraday minutes; 'D' for daily.",
+            enum: ["1m", "5m", "15m", "25m", "1h", "1d"],
+            description: "Candle interval. '1m','5m','15m','25m','1h' for intraday; '1d' for daily.",
           },
           days: {
             type: "number",
@@ -299,17 +289,21 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbol", "interval", "days"],
       },
     },
-    handler: async (args, client) => {
+    handler: async (args, broker) => {
       const symbol = args.symbol as string;
-      const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
-      const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
-      const candles = await fetchCandles(symbol, interval, days, client);
+      const interval = args.interval as CandleInterval;
+      const days = Math.min(args.days as number, interval === "1d" ? 365 : 30);
+      const to = new Date();
+      const from = new Date();
+      from.setDate(from.getDate() - days);
+      const candles = await broker.getHistory(symbol, interval, from, to);
       return JSON.stringify(candles.slice(-200), null, 2);
     },
   },
 
   compute_indicators: {
     requiresApproval: false,
+    requiresCapability: "supportsHistoricalData",
     definition: {
       name: "compute_indicators",
       description:
@@ -323,8 +317,8 @@ export const TOOLS: Record<string, ToolDefinition> = {
           },
           interval: {
             type: "string",
-            enum: ["1", "5", "15", "25", "60", "D"],
-            description: "Candle interval. '1','5','15','25','60' for intraday minutes; 'D' for daily.",
+            enum: ["1m", "5m", "15m", "25m", "1h", "1d"],
+            description: "Candle interval. '1m','5m','15m','25m','1h' for intraday; '1d' for daily.",
           },
           days: {
             type: "number",
@@ -334,11 +328,14 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbol", "interval", "days"],
       },
     },
-    handler: async (args, client) => {
+    handler: async (args, broker) => {
       const symbol = args.symbol as string;
-      const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
-      const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
-      const candles = await fetchCandles(symbol, interval, days, client);
+      const interval = args.interval as CandleInterval;
+      const days = Math.min(args.days as number, interval === "1d" ? 365 : 30);
+      const to = new Date();
+      const from = new Date();
+      from.setDate(from.getDate() - days);
+      const candles = await broker.getHistory(symbol, interval, from, to);
       if (candles.length < 26) {
         return JSON.stringify({ error: "Insufficient data for indicators. Try more days or a broader interval." });
       }
@@ -364,7 +361,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbol"],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const result = await getFundamentals(args.symbol as string);
       return JSON.stringify(result, null, 2);
     },
@@ -387,7 +384,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbol"],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const symbol = args.symbol as string;
       if (!(await isEtf(symbol))) {
         return JSON.stringify({ error: `'${symbol}' is not an ETF. Use search_instruments with type='etf' to find ETF symbols.` });
@@ -417,7 +414,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: [],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const category = (args.category as "markets" | "economy" | "companies" | "finance") ?? "markets";
       const limit = Math.min(Math.max((args.limit as number) ?? 10, 1), 20);
       const news = await fetchNews(category, limit);
@@ -437,7 +434,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: [],
       },
     },
-    handler: async (_args, _client) => {
+    handler: async (_args, _broker) => {
       const status = getMarketStatus();
       return JSON.stringify(status, null, 2);
     },
@@ -459,7 +456,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: [],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const result = isTradingDay(args.date as string | undefined);
       return JSON.stringify(result, null, 2);
     },
@@ -481,7 +478,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: [],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const n = Math.min(Math.max((args.n as number) ?? 5, 1), 20);
       const holidays = getUpcomingHolidays(n);
       return JSON.stringify(holidays, null, 2);
@@ -513,7 +510,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["query"],
       },
     },
-    handler: async (args, _client) => {
+    handler: async (args, _broker) => {
       const results = await searchInstruments(
         args.query as string,
         (args.limit as number) ?? 20,
@@ -525,6 +522,7 @@ export const TOOLS: Record<string, ToolDefinition> = {
 
   get_top_movers: {
     requiresApproval: false,
+    requiresCapability: "availableIndices",
     definition: {
       name: "get_top_movers",
       description: "Get top N gainers and losers from a Nifty index basket based on today's price change.",
@@ -544,64 +542,26 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: [],
       },
     },
-    handler: async (args, client) => {
+    handler: async (args, broker) => {
       const n = Math.min(Math.max((args.n as number) ?? 5, 1), 25);
       const index = (args.index as string) ?? "NIFTY50";
-      const securityIds = await getIndexConstituents(index);
+      const symbols = await getIndexConstituents(index);
+      if (symbols.length === 0) return JSON.stringify({ error: `No constituents found for index: ${index}` });
 
-      // Fetch quotes in batches of 25, up to 5 batches concurrently
-      const batchSize = 25;
-      const BATCH_CONCURRENCY = 5;
-      const batches: string[][] = [];
-      for (let i = 0; i < securityIds.length; i += batchSize) {
-        batches.push(securityIds.slice(i, i + batchSize));
-      }
-
-      const allData: unknown[] = [];
-      for (let i = 0; i < batches.length; i += BATCH_CONCURRENCY) {
-        const chunk = batches.slice(i, i + BATCH_CONCURRENCY);
-        const results = await Promise.all(chunk.map(b => client.getQuote(b).catch(() => null)));
-        for (const result of results) {
-          if (!result) continue;
-          const nseEq = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.["NSE_EQ"] as Record<string, Record<string, unknown>> | undefined;
-          if (nseEq && typeof nseEq === "object") {
-            for (const [secId, q] of Object.entries(nseEq)) {
-              allData.push({ ...q, securityId: secId });
-            }
-          }
-        }
-      }
-
-      type QuoteItem = {
-        tradingSymbol: string;
-        lastPrice: number;
-        previousClose: number;
-        pct_change: number;
-      };
-
-      const items: QuoteItem[] = (allData as Array<Record<string, unknown>>)
-        .filter((q) => q["last_price"] && (q["ohlc"] as Record<string, number> | undefined)?.["close"])
-        .map((q) => {
-          const lp = q["last_price"] as number;
-          const pc = (q["ohlc"] as Record<string, number>)["close"];
-          return {
-            tradingSymbol: (q["tradingSymbol"] as string) ?? String(q["securityId"]),
-            lastPrice: lp,
-            previousClose: pc,
-            pct_change: +((lp - pc) / pc * 100).toFixed(2),
-          };
-        });
-
+      const quotes = await broker.getQuote(symbols);
+      const items = quotes
+        .filter(q => q.lastPrice > 0)
+        .map(q => ({ tradingSymbol: q.symbol, lastPrice: q.lastPrice, previousClose: q.previousClose, pct_change: q.changePercent }));
       items.sort((a, b) => b.pct_change - a.pct_change);
       const gainers = items.slice(0, n);
       const losers = items.slice(-n).reverse();
-
       return JSON.stringify({ index, gainers, losers }, null, 2);
     },
   },
 
   get_market_depth: {
     requiresApproval: false,
+    requiresCapability: "supportsMarketDepth",
     definition: {
       name: "get_market_depth",
       description: "Get the full bid/ask order book (market depth) for an NSE equity symbol.",
@@ -616,11 +576,9 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbol"],
       },
     },
-    handler: async (args, client) => {
-      const symbol = args.symbol as string;
-      const securityId = await getSecurityId(symbol);
-      const result = await client.getMarketDepth(securityId);
-      return JSON.stringify(result, null, 2);
+    handler: async (args, broker) => {
+      const depth = await broker.getMarketDepth(args.symbol as string);
+      return JSON.stringify(depth, null, 2);
     },
   },
 
@@ -644,87 +602,44 @@ export const TOOLS: Record<string, ToolDefinition> = {
         required: ["symbols"],
       },
     },
-    handler: async (args, client) => {
+    handler: async (args, broker) => {
       const symbols = args.symbols as string[];
       if (symbols.length < 2 || symbols.length > 5) {
         return JSON.stringify({ error: "Provide 2–5 symbols for comparison." });
       }
 
-      // Resolve each symbol to its segment
-      const resolved = await Promise.all(symbols.map((s) => resolveInstrument(s)));
+      const quotes = await broker.getQuote(symbols);
+      const quoteMap = new Map(quotes.map(q => [q.symbol.toUpperCase(), q]));
+      const availableIndices = new Set(broker.capabilities.availableIndices.map(i => i.toUpperCase()));
 
-      // Group by segment for batched quote fetches
-      const equityIds: string[] = [];
-      const indexIds: string[] = [];
-      resolved.forEach(({ securityId, exchangeSegment }) => {
-        if (exchangeSegment === "IDX_I") indexIds.push(securityId);
-        else equityIds.push(securityId);
-      });
-
-      // Fetch quotes per segment, merge into quoteMap (keyed by securityId)
-      const quoteMap: Record<string, Record<string, unknown>> = {};
-      const extractQuotes = (result: unknown, segKey: string) => {
-        // New format: result.data[segKey] is an object keyed by securityId string
-        const segData = ((result as Record<string, unknown>)["data"] as Record<string, unknown>)?.[segKey] as Record<string, Record<string, unknown>> | undefined;
-        if (segData && typeof segData === "object") {
-          for (const [secId, q] of Object.entries(segData)) {
-            // Store normalized entry keyed by securityId
-            const normalized: Record<string, unknown> = {
-              securityId: secId,
-              lastPrice: q["last_price"],
-              previousClose: (q["ohlc"] as Record<string, number> | undefined)?.["close"],
-              open: (q["ohlc"] as Record<string, number> | undefined)?.["open"],
-              high: (q["ohlc"] as Record<string, number> | undefined)?.["high"],
-              low: (q["ohlc"] as Record<string, number> | undefined)?.["low"],
-            };
-            quoteMap[secId] = normalized;
-          }
-        }
-      };
-
-      await Promise.all([
-        equityIds.length > 0
-          ? client.getQuote(equityIds, "NSE_EQ").then((r) => extractQuotes(r, "NSE_EQ"))
-          : Promise.resolve(),
-        indexIds.length > 0
-          ? client.getQuote(indexIds, "IDX_I").then((r) => extractQuotes(r, "IDX_I"))
-          : Promise.resolve(),
-      ]);
-
-      // Fetch fundamentals only for equities
       const fundamentalsArr = await Promise.all(
-        symbols.map((s, i) =>
-          resolved[i].instrument === "EQUITY"
+        symbols.map(s =>
+          !availableIndices.has(s.toUpperCase())
             ? getFundamentals(s).catch(() => ({ symbol: s }))
             : Promise.resolve(null)
         )
       );
 
       const comparison = symbols.map((sym, i) => {
-        const { securityId } = resolved[i];
-        const quote = quoteMap[securityId] ?? quoteMap[sym.toUpperCase()] ?? {};
+        const quote = quoteMap.get(sym.toUpperCase());
         const fund = fundamentalsArr[i] as Record<string, unknown> | null;
         return {
           symbol: sym.toUpperCase(),
-          type: resolved[i].instrument,
-          last_price: quote["lastPrice"],
-          change_pct: quote["previousClose"]
-            ? +(((quote["lastPrice"] as number) - (quote["previousClose"] as number)) / (quote["previousClose"] as number) * 100).toFixed(2)
-            : undefined,
-          ...(fund
-            ? {
-                pe_ratio: fund["pe_ratio"],
-                forward_pe: fund["forward_pe"],
-                eps: fund["eps"],
-                market_cap: fund["market_cap"],
-                sector: fund["sector"],
-                industry: fund["industry"],
-                fifty_two_week_high: fund["fifty_two_week_high"],
-                fifty_two_week_low: fund["fifty_two_week_low"],
-                roe: fund["roe"],
-                debt_to_equity: fund["debt_to_equity"],
-              }
-            : {}),
+          type: availableIndices.has(sym.toUpperCase()) ? "INDEX" : "EQUITY",
+          last_price: quote?.lastPrice,
+          change_pct: quote?.changePercent,
+          ...(fund ? {
+            pe_ratio: fund["pe_ratio"],
+            forward_pe: fund["forward_pe"],
+            eps: fund["eps"],
+            market_cap: fund["market_cap"],
+            sector: fund["sector"],
+            industry: fund["industry"],
+            fifty_two_week_high: fund["fifty_two_week_high"],
+            fifty_two_week_low: fund["fifty_two_week_low"],
+            roe: fund["roe"],
+            debt_to_equity: fund["debt_to_equity"],
+          } : {}),
         };
       });
 
@@ -733,8 +648,22 @@ export const TOOLS: Record<string, ToolDefinition> = {
   },
 };
 
-export function getAllToolDefinitions(extra: ToolDefinition[] = []): Anthropic.Tool[] {
-  return [...Object.values(TOOLS), ...extra].map((t) => t.definition);
+export function getAllToolDefinitions(extra: ToolDefinition[] = [], broker?: BrokerAdapter): Anthropic.Tool[] {
+  const tools = [...Object.values(TOOLS), ...extra];
+  // Filter by capabilities if broker is provided
+  if (broker) {
+    return tools
+      .filter(t => {
+        if (!t.requiresCapability) return true;
+        const cap = t.requiresCapability as string;
+        const val = broker.capabilities[cap as keyof BrokerCapabilities];
+        if (typeof val === "boolean") return val;
+        if (Array.isArray(val)) return val.length > 0;
+        return true;
+      })
+      .map(t => t.definition);
+  }
+  return tools.map(t => t.definition);
 }
 
 export function createUpdateMemoryTool(store: MemoryStore): ToolDefinition {
@@ -1228,7 +1157,7 @@ The plan field should describe the full trading policy: objectives, entry/exit s
           return JSON.stringify({
             error: "Strategy has open positions",
             openPositions: openPositions.map(p => ({ symbol: p.symbol, quantity: p.quantity })),
-            hint: "Close all tagged positions in Dhan before archiving",
+            hint: "Close all tagged positions in the broker before archiving",
           });
         }
       }
@@ -1287,15 +1216,15 @@ export function createTradeTools(store: TradeStore): ToolDefinition[] {
     requiresApproval: false,
     definition: {
       name: "sync_tradebook",
-      description: "Pull today's executed trades from Dhan and update local trade records with fill prices, timestamps, and realized P&L for SELL trades.",
+      description: "Pull today's executed trades from the broker and update local trade records with fill prices, timestamps, and realized P&L for SELL trades.",
       input_schema: {
         type: "object",
         properties: {},
         required: [],
       },
     },
-    handler: async (_args, client) => {
-      const result = await syncOrders(client, store);
+    handler: async (_args, broker) => {
+      const result = await syncOrders(broker, store);
       return JSON.stringify({
         fillsUpdated: result.fillsUpdated,
         rejectedOrCancelledDetected: result.rejectedOrCancelled,

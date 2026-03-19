@@ -1,22 +1,24 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { DhanClient } from "./dhan/client.js";
+import { createBrokerAdapter } from "./brokers/index.js";
+import type { BrokerAdapter } from "./brokers/types.js";
 import type { CredentialsStore } from "./storage/types.js";
 
 type CredentialKey = "ANTHROPIC_API_KEY" | "DHAN_ACCESS_TOKEN" | "DHAN_CLIENT_ID";
 
 interface CredentialsMap {
+  broker?: string;
   ANTHROPIC_API_KEY?: string;
   DHAN_ACCESS_TOKEN?: string;
   DHAN_CLIENT_ID?: string;
 }
 
 interface ServiceRefs {
-  heartbeat: { setDhanClient(c: DhanClient): void } | null;
+  heartbeat: { setBrokerAdapter(a: BrokerAdapter): void } | null;
 }
 
 class AppCredentialsStore {
   private map: CredentialsMap = {};
-  private dhanClient: DhanClient | null = null;
+  private brokerAdapter: BrokerAdapter | null = null;
   private anthropicClient: Anthropic | null = null;
   private services: ServiceRefs = { heartbeat: null };
   private store: CredentialsStore | null = null;
@@ -26,16 +28,13 @@ class AppCredentialsStore {
   }
 
   async load(): Promise<void> {
-    // Seed from process.env as defaults
     const envMap: CredentialsMap = {};
     if (process.env.ANTHROPIC_API_KEY) envMap.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
     if (process.env.DHAN_ACCESS_TOKEN) envMap.DHAN_ACCESS_TOKEN = process.env.DHAN_ACCESS_TOKEN;
     if (process.env.DHAN_CLIENT_ID) envMap.DHAN_CLIENT_ID = process.env.DHAN_CLIENT_ID;
 
-    // credentials.json overrides process.env
     const saved = await this.store?.read();
     this.map = saved ? { ...envMap, ...(saved as CredentialsMap) } : envMap;
-
     this.rebuildClients();
   }
 
@@ -47,7 +46,7 @@ class AppCredentialsStore {
     };
   }
 
-  async update(patch: Partial<CredentialsMap>): Promise<void> {
+  async update(patch: Partial<Record<string, string>>): Promise<void> {
     for (const [k, v] of Object.entries(patch)) {
       if (v !== undefined && v !== "") {
         (this.map as Record<string, string>)[k] = v;
@@ -62,11 +61,11 @@ class AppCredentialsStore {
     this.services = services;
   }
 
-  getDhanClient(): DhanClient {
-    if (!this.dhanClient) {
-      throw new Error("Dhan credentials not configured. Please set them via the Settings tab.");
+  getBrokerAdapter(): BrokerAdapter {
+    if (!this.brokerAdapter) {
+      throw new Error("Broker credentials not configured. Please set them via the Settings tab.");
     }
-    return this.dhanClient;
+    return this.brokerAdapter;
   }
 
   getAnthropicClient(): Anthropic {
@@ -83,24 +82,27 @@ class AppCredentialsStore {
       this.anthropicClient = null;
     }
 
+    const broker = this.map.broker ?? "dhan";
     if (this.map.DHAN_ACCESS_TOKEN && this.map.DHAN_CLIENT_ID) {
       try {
-        this.dhanClient = new DhanClient(this.map.DHAN_ACCESS_TOKEN, this.map.DHAN_CLIENT_ID);
+        this.brokerAdapter = createBrokerAdapter(broker, this.map as Record<string, string>);
       } catch {
-        this.dhanClient = null;
+        this.brokerAdapter = null;
       }
     } else {
-      this.dhanClient = null;
+      this.brokerAdapter = null;
     }
   }
 
   private propagateClients(): void {
-    if (this.dhanClient) {
-      this.services.heartbeat?.setDhanClient(this.dhanClient);
+    if (this.brokerAdapter) {
+      this.services.heartbeat?.setBrokerAdapter(this.brokerAdapter);
     }
   }
 }
 
 export const credentialsStore = new AppCredentialsStore();
-export function getDhanClient(): DhanClient { return credentialsStore.getDhanClient(); }
+export function getBrokerAdapter(): BrokerAdapter { return credentialsStore.getBrokerAdapter(); }
 export function getAnthropicClient(): Anthropic { return credentialsStore.getAnthropicClient(); }
+// Backward compat alias (used in chat.ts, status.ts, approvals.ts)
+export function getDhanClient(): BrokerAdapter { return credentialsStore.getBrokerAdapter(); }

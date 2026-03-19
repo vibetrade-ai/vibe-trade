@@ -1,16 +1,16 @@
 import type { FastifyInstance } from "fastify";
-import { getDhanClient } from "../lib/credentials.js";
-import { DhanTokenExpiredError } from "../types.js";
+import { getBrokerAdapter } from "../lib/credentials.js";
+import { BrokerAuthError } from "../lib/brokers/errors.js";
 
 export async function statusRoute(fastify: FastifyInstance) {
   fastify.get("/status", async (_request, reply) => {
     try {
-      const client = getDhanClient();
-      // Use getFunds as a lightweight connectivity check
-      await client.getFunds();
-      return reply.send({ status: "connected", message: "Dhan account connected successfully" });
+      const broker = getBrokerAdapter();
+      await broker.getFunds();
+      const name = broker.capabilities.name;
+      return reply.send({ status: "connected", message: `${name} account connected successfully` });
     } catch (err) {
-      if (err instanceof DhanTokenExpiredError) {
+      if (err instanceof BrokerAuthError) {
         return reply.status(401).send({ status: "token_expired", message: err.message });
       }
       if (err instanceof Error && err.message.includes("credentials not configured")) {

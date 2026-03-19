@@ -14,7 +14,7 @@ export async function settingsRoute(fastify: FastifyInstance) {
       return reply.status(400).send({ error: "Invalid request body" });
     }
 
-    const allowed = ["ANTHROPIC_API_KEY", "DHAN_ACCESS_TOKEN", "DHAN_CLIENT_ID"];
+    const allowed = ["ANTHROPIC_API_KEY", "DHAN_ACCESS_TOKEN", "DHAN_CLIENT_ID", "broker"];
     const patch: Record<string, string> = {};
     for (const key of allowed) {
       if (typeof body[key] === "string" && body[key].trim() !== "") {

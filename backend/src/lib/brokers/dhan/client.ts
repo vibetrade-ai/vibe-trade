@@ -1,4 +1,4 @@
-import { BrokerAuthError as DhanTokenExpiredError } from "../brokers/errors.js";
+import { BrokerAuthError } from "../errors.js";
 
 const BASE_URL = "https://api.dhan.co/v2";
 
@@ -80,7 +80,7 @@ export class DhanClient {
       if (!res.ok) {
         if (typeof data === "object" && data !== null) {
           const message = parseDhanError(data as DhanErrorResponse, res.status);
-          if (message === "TOKEN_EXPIRED") throw new DhanTokenExpiredError();
+          if (message === "TOKEN_EXPIRED") throw new BrokerAuthError();
           throw new Error(`Dhan API error ${res.status}: ${message}`);
         }
         throw new Error(`Dhan API error ${res.status}: ${String(data) || res.statusText}`);
@@ -134,13 +134,14 @@ export class DhanClient {
     transactionType: "BUY" | "SELL";
     quantity: number;
     orderType: "MARKET" | "LIMIT";
+    productType?: string;
     price?: number;
   }): Promise<unknown> {
     const body: Record<string, unknown> = {
       dhanClientId: this.clientId,
       transactionType: params.transactionType,
       exchangeSegment: "NSE_EQ",
-      productType: "INTRADAY",
+      productType: params.productType ?? "INTRADAY",
       orderType: params.orderType,
       validity: "DAY",
       tradingSymbol: params.symbol,

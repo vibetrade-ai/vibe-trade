@@ -14,7 +14,7 @@ import { triggersRoute } from "./routes/triggers.js";
 import { strategiesRoute } from "./routes/strategies.js";
 import { settingsRoute } from "./routes/settings.js";
 import { createStorageProvider } from "./lib/storage/index.js";
-import { credentialsStore, getDhanClient } from "./lib/credentials.js";
+import { credentialsStore, getBrokerAdapter } from "./lib/credentials.js";
 import { HeartbeatService } from "./lib/heartbeat/service.js";
 import { getDataDir } from "./lib/data-dir.js";
 import { computeNextRunAt, computeNextTradingRunAt } from "./lib/heartbeat/cron-utils.js";
@@ -181,11 +181,11 @@ async function start() {
   // Start heartbeat (after server is up)
   let heartbeat: HeartbeatService | null = null;
   try {
-    const dhan = getDhanClient();
-    heartbeat = new HeartbeatService(dhan, storage.triggers, storage.approvals, storage.triggerAudit, storage.memory, 60_000, storage.strategies, storage.trades);
+    const broker = getBrokerAdapter();
+    heartbeat = new HeartbeatService(broker, storage.triggers, storage.approvals, storage.triggerAudit, storage.memory, 60_000, storage.strategies, storage.trades);
     heartbeat.start();
   } catch (err) {
-    console.warn("[heartbeat] Failed to start (Dhan credentials not configured):", (err as Error).message);
+    console.warn("[heartbeat] Failed to start (broker credentials not configured):", (err as Error).message);
   }
 
   credentialsStore.registerServices({ heartbeat });

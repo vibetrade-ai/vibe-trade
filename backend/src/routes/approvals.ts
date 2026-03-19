@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "crypto";
-import { getDhanClient } from "../lib/credentials.js";
-import { getSecurityId } from "../lib/dhan/instruments.js";
+import { getBrokerAdapter } from "../lib/credentials.js";
 import type { ApprovalStore, TriggerStore } from "../lib/storage/index.js";
 
 export async function approvalsRoute(
@@ -46,19 +45,18 @@ export async function approvalsRoute(
       // Approved
       if (approval.kind === "trade") {
         try {
-          const dhan = getDhanClient();
+          const broker = getBrokerAdapter();
           const ta = approval.tradeArgs;
-          const securityId = await getSecurityId(ta.symbol);
-          const result = await dhan.placeOrder({
+          const result = await broker.placeOrder({
             symbol: ta.symbol,
-            securityId,
-            transactionType: ta.transaction_type,
+            side: ta.transaction_type,
             quantity: ta.quantity,
             orderType: ta.order_type,
+            productType: "INTRADAY",
             price: ta.price,
           });
           await opts.approvals.updateStatus(id, "approved", decidedAt);
-          return { ok: true, orderId: (result as Record<string, unknown>)["orderId"] };
+          return { ok: true, orderId: result.orderId };
         } catch (err) {
           reply.code(500);
           return { ok: false, error: err instanceof Error ? err.message : String(err) };

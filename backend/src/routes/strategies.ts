@@ -1,9 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import type { StrategyStore, TriggerStore, TradeStore, TradeRecord } from "../lib/storage/index.js";
-import type { DhanClient } from "../lib/dhan/client.js";
-import { getDhanClient } from "../lib/credentials.js";
+import { getBrokerAdapter } from "../lib/credentials.js";
 import { computeOpenPositions, computeRealizedPnl } from "../lib/trade-utils.js";
-import { syncOrders } from "../lib/order-sync.js";
+import { syncOrders } from "../lib/brokers/dhan/order-sync.js";
 
 export async function strategiesRoute(
   fastify: FastifyInstance,
@@ -97,7 +96,7 @@ export async function strategiesRoute(
       return {
         error: "Strategy has open positions",
         openPositions: openPositions.map(p => ({ symbol: p.symbol, quantity: p.quantity })),
-        hint: "Close all tagged positions in Dhan before archiving",
+        hint: "Close all tagged positions in the broker before archiving",
       };
     }
 
@@ -164,24 +163,24 @@ export async function strategiesRoute(
     };
   });
 
-  // POST /api/trades/sync — pull Dhan tradebook and update pending records
+  // POST /api/trades/sync — pull broker tradebook and update pending records
   fastify.post("/api/trades/sync", async (_request, reply) => {
-    let dhan: DhanClient;
+    let broker;
     try {
-      dhan = getDhanClient();
+      broker = getBrokerAdapter();
     } catch {
       reply.code(503);
-      return { error: "Dhan credentials not configured" };
+      return { error: "Broker credentials not configured" };
     }
 
     let tradebookEntries = 0;
     try {
-      const raw = await dhan.getTradebook();
-      tradebookEntries = Array.isArray(raw) ? (raw as unknown[]).length : 0;
+      const tradebook = await broker.getTradebook();
+      tradebookEntries = Array.isArray(tradebook) ? tradebook.length : 0;
     } catch (err) {
       console.error("[trades/sync] tradebook fetch failed:", err);
     }
-    const { fillsUpdated: updated } = await syncOrders(dhan, opts.trades);
+    const { fillsUpdated: updated } = await syncOrders(broker, opts.trades);
     return { tradebookEntries, updated };
   });
 

@@ -1,15 +1,12 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
-import type { DhanClient } from "../dhan/client.js";
+import type { BrokerAdapter } from "../brokers/types.js";
 import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore } from "../storage/index.js";
 import type { Trigger, SystemSnapshot, TradeArgs } from "./types.js";
 import { TOOLS } from "../tools.js";
 import { getAnthropicClient } from "../credentials.js";
-import { fetchCandles } from "../dhan/candles.js";
 import type { Candle } from "../indicators.js";
 import { computeIndicators } from "../indicators.js";
-import { DhanTokenExpiredError } from "../../types.js";
-import { syncOrders } from "../order-sync.js";
 
 // ── TtlCache ──────────────────────────────────────────────────────────────────
 class TtlCache<T> {
@@ -28,7 +25,7 @@ class TtlCache<T> {
 const candleCache = new TtlCache<Candle[]>();
 
 function candleTtl(interval: string): number {
-  return interval === "D" ? 4 * 3600_000 : parseInt(interval) * 60_000;
+  return interval === "1d" ? 4 * 3600_000 : parseInt(interval) * 60_000;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -198,7 +195,7 @@ const RUNNER_TOOLS: Anthropic.Tool[] = [
 export async function runReasoningJob(
   trigger: Trigger,
   snapshot: SystemSnapshot,
-  dhan: DhanClient,
+  broker: BrokerAdapter,
   triggerStore: TriggerStore,
   approvalStore: ApprovalStore,
   auditStore: TriggerAuditStore,
@@ -206,23 +203,6 @@ export async function runReasoningJob(
   strategyStore?: StrategyStore,
 ): Promise<void> {
   const startedAt = Date.now();
-
-  // Pre-flight: fail fast if Dhan token is expired
-  try {
-    await dhan.getFunds();
-  } catch (err) {
-    if (err instanceof DhanTokenExpiredError) {
-      const msg = "Dhan token expired — update credentials in Settings.";
-      console.warn(`[heartbeat] skipping runner for trigger ${trigger.id}: ${msg}`);
-      await auditStore.append({
-        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
-        outcome: { type: "reasoning_job_no_action", reason: msg },
-      }).catch(() => {});
-      return;
-    }
-    // Non-token errors — let the job continue
-  }
 
   const memoryContent = await memory.read().catch(() => "");
   let systemPrompt = RUNNER_SYSTEM + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
@@ -406,8 +386,8 @@ Analyze the situation and take appropriate action.`;
 
           } else if (toolUse.name === "get_historical_data") {
             const symbol = args.symbol as string;
-            const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
-            const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
+            const interval = args.interval as string;
+            const days = Math.min(args.days as number, interval === "1d" ? 365 : 30);
             const cacheKey = `get_historical_data:${JSON.stringify(args)}`;
             const cached = resultCache.get(cacheKey);
             if (cached !== undefined) {
@@ -416,7 +396,10 @@ Analyze the situation and take appropriate action.`;
               const candleKey = `${symbol}:${interval}:${days}`;
               let candles = candleCache.get(candleKey);
               if (!candles) {
-                candles = await fetchCandles(symbol, interval, days, dhan);
+                const to = new Date();
+                const from = new Date();
+                from.setDate(from.getDate() - days);
+                candles = await broker.getHistory(symbol, interval as import("../brokers/types.js").CandleInterval, from, to);
                 candleCache.set(candleKey, candles, candleTtl(interval));
               }
               const summary = historicalSummary(symbol, interval, candles);
@@ -426,8 +409,8 @@ Analyze the situation and take appropriate action.`;
 
           } else if (toolUse.name === "compute_indicators") {
             const symbol = args.symbol as string;
-            const interval = args.interval as "1" | "5" | "15" | "25" | "60" | "D";
-            const days = Math.min(args.days as number, interval === "D" ? 365 : 30);
+            const interval = args.interval as string;
+            const days = Math.min(args.days as number, interval === "1d" ? 365 : 30);
             const cacheKey = `compute_indicators:${JSON.stringify(args)}`;
             const cached = resultCache.get(cacheKey);
             if (cached !== undefined) {
@@ -436,7 +419,10 @@ Analyze the situation and take appropriate action.`;
               const candleKey = `${symbol}:${interval}:${days}`;
               let candles = candleCache.get(candleKey);
               if (!candles) {
-                candles = await fetchCandles(symbol, interval, days, dhan);
+                const to = new Date();
+                const from = new Date();
+                from.setDate(from.getDate() - days);
+                candles = await broker.getHistory(symbol, interval as import("../brokers/types.js").CandleInterval, from, to);
                 candleCache.set(candleKey, candles, candleTtl(interval));
               }
               if (candles.length < 26) {
@@ -458,12 +444,12 @@ Analyze the situation and take appropriate action.`;
               if (cached !== undefined) {
                 resultText = cached;
               } else {
-                const fullResult = await toolDef.handler(args, dhan);
+                const fullResult = await toolDef.handler(args, broker);
                 resultCache.set(cacheKey, fullResult);
                 resultText = summariseForHistory(toolUse.name, fullResult);
               }
             } else {
-              resultText = await toolDef.handler(args, dhan);
+              resultText = await toolDef.handler(args, broker);
             }
           }
         } catch (err) {

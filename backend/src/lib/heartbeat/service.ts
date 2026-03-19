@@ -1,13 +1,13 @@
 import { randomUUID } from "crypto";
-import type { DhanClient } from "../dhan/client.js";
+import type { BrokerAdapter } from "../brokers/types.js";
 import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore, TradeStore } from "../storage/index.js";
 import { buildSnapshot } from "./snapshot.js";
 import { evaluateCodeTriggers, evaluateLlmTriggers, evaluateTimeTriggers } from "./evaluator.js";
 import { evaluateEventTriggers } from "./event-evaluator.js";
 import { runReasoningJob } from "./runner.js";
-import { getSecurityId } from "../dhan/instruments.js";
+import { getSecurityId } from "../brokers/dhan/instruments.js";
 import { getMarketStatus } from "../market-calendar.js";
-import { syncOrders } from "../order-sync.js";
+import { syncOrders } from "../brokers/dhan/order-sync.js";
 import { fetchNews } from "../news.js";
 import { getFundamentals, getVixQuote } from "../yahoo.js";
 import { computeNextRunAt, computeNextTradingRunAt, evaluateCronTriggers } from "./cron-utils.js";
@@ -23,7 +23,7 @@ export class HeartbeatService {
   private seenHeadlineLinks = new Set<string>();
 
   constructor(
-    private dhan: DhanClient,
+    private broker: BrokerAdapter,
     private readonly triggers: TriggerStore,
     private readonly approvals: ApprovalStore,
     private readonly triggerAudit: TriggerAuditStore,
@@ -33,8 +33,13 @@ export class HeartbeatService {
     private readonly tradeStore?: TradeStore,
   ) {}
 
-  setDhanClient(client: DhanClient): void {
-    this.dhan = client;
+  setBrokerAdapter(adapter: BrokerAdapter): void {
+    this.broker = adapter;
+  }
+
+  // Backward compat alias
+  setDhanClient(adapter: BrokerAdapter): void {
+    this.broker = adapter;
   }
 
   start(): void {
@@ -203,7 +208,7 @@ export class HeartbeatService {
         if (!isMarketActive) {
           console.log(`[heartbeat] market ${marketStatus.session} — skipping ${codeTriggers.length + llmTriggers.length + eventTriggers.length} code/llm/event trigger(s) until ${marketStatus.next_open}`);
         } else {
-          snapshot = await buildSnapshot(this.dhan, activeOnly);
+          snapshot = await buildSnapshot(this.broker, activeOnly);
           const delta = await this.buildEventDelta(snapshot, eventTriggers);
           [codeFired, llmFired, eventFired] = await Promise.all([
             Promise.resolve(evaluateCodeTriggers(snapshot, codeTriggers, delta)),
@@ -225,7 +230,7 @@ export class HeartbeatService {
         activeOnly.find(t => t.id === id)?.action.type === "reasoning_job"
       );
       if (hasReasoningJob && this.tradeStore) {
-        const r = await syncOrders(this.dhan, this.tradeStore);
+        const r = await syncOrders(this.broker, this.tradeStore);
         if (r.fillsUpdated + r.rejectedOrCancelled > 0) {
           console.log(`[heartbeat] order-sync: ${r.fillsUpdated} filled, ${r.rejectedOrCancelled} rejected/cancelled`);
         }
@@ -239,7 +244,7 @@ export class HeartbeatService {
 
         // If snapshot is null (only time triggers fired), build minimal snapshot
         if (!snapshot) {
-          snapshot = await buildSnapshot(this.dhan, []);
+          snapshot = await buildSnapshot(this.broker, []);
         }
 
         if (trigger.action.type === "hard_order") {
@@ -247,16 +252,16 @@ export class HeartbeatService {
           await this.triggers.setStatus(trigger.id, "fired", { firedAt: nowIso });
           try {
             const tradeArgs = trigger.action.tradeArgs;
-            const securityId = await getSecurityId(tradeArgs.symbol);
-            const orderResult = await this.dhan.placeOrder({
+            const securityId = await getSecurityId(tradeArgs.symbol).catch(() => tradeArgs.symbol);
+            const orderResult = await this.broker.placeOrder({
               symbol: tradeArgs.symbol,
-              securityId,
-              transactionType: tradeArgs.transaction_type,
+              side: tradeArgs.transaction_type,
               quantity: tradeArgs.quantity,
               orderType: tradeArgs.order_type,
+              productType: "INTRADAY",
               price: tradeArgs.price,
             });
-            const orderId = (orderResult as Record<string, unknown>)["orderId"] as string ?? randomUUID();
+            const orderId = orderResult.orderId ?? randomUUID();
             await this.triggers.setStatus(trigger.id, "fired", { firedAt: nowIso, outcomeId: orderId });
             await this.triggerAudit.append({
               id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
@@ -326,7 +331,7 @@ export class HeartbeatService {
 
           this.activeJobs++;
           console.log(`[heartbeat] reasoning job started for trigger ${trigger.id}`);
-          runReasoningJob(trigger, snapshot, this.dhan, this.triggers, this.approvals, this.triggerAudit, this.memory, this.strategyStore)
+          runReasoningJob(trigger, snapshot, this.broker, this.triggers, this.approvals, this.triggerAudit, this.memory, this.strategyStore)
             .catch(async err => {
               const error = err instanceof Error ? err.message : String(err);
               console.error(`[heartbeat] reasoning job error for ${trigger.id}:`, err);

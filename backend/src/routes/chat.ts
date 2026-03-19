@@ -1,15 +1,16 @@
 import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
-import type { DhanClient } from "../lib/dhan/client.js";
-import { getDhanClient, getAnthropicClient } from "../lib/credentials.js";
+import type { BrokerAdapter } from "../lib/brokers/types.js";
+import { getBrokerAdapter, getAnthropicClient } from "../lib/credentials.js";
+import { BrokerAuthError } from "../lib/brokers/errors.js";
 import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createPauseTriggerTool, createResumeTriggerTool, createGetTriggerRunsTool, createStrategyTools, createTradeTools } from "../lib/tools.js";
-import { DhanTokenExpiredError } from "../types.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
 import type { ConversationStore, MemoryStore, TriggerStore, TriggerAuditStore, ApprovalStore, StrategyStore, TradeStore } from "../lib/storage/index.js";
-import { getSecurityId } from "../lib/dhan/instruments.js";
+import { getSecurityId } from "../lib/brokers/dhan/instruments.js";
 
-const SYSTEM_PROMPT = `You are VibeTrade, an AI-powered trading assistant connected to the user's Dhan brokerage account.
+function buildSystemPrompt(broker: BrokerAdapter | null): string {
+  const base = `You are VibeTrade, an AI-powered trading assistant connected to the user's brokerage account.
 
 You have access to tools to fetch live quotes, view positions/funds/orders, and place or cancel orders.
 
@@ -27,8 +28,23 @@ Formatting:
 
 Error handling:
 - If a tool returns an error starting with "TOOL_ERROR:", explain what went wrong in plain, friendly language — no technical jargon, no HTTP status codes, no internal error codes
-- Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means Dhan's servers are having issues
+- Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means the broker's servers are having issues
 - If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
+
+  if (!broker) return base;
+
+  const caps = broker.capabilities;
+  const brokerBlock = `\n\n<broker>
+Name: ${caps.name}
+Markets: ${caps.markets.join(", ")}
+Asset classes: ${caps.assetClasses.join(", ")}
+Historical data: ${caps.supportsHistoricalData}
+Market depth: ${caps.supportsMarketDepth}
+Available indices: ${caps.availableIndices.join(", ")}
+</broker>`;
+
+  return base + brokerBlock;
+}
 
 export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; triggerAudit: TriggerAuditStore; approvals: ApprovalStore; strategies: StrategyStore; trades: TradeStore }) {
   fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
@@ -62,7 +78,6 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
       localTools[t.definition.name] = t;
     }
     const memoryContent = await opts.memory.read();
-    const baseSystemPrompt = SYSTEM_PROMPT + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
 
     function send(msg: ServerMessage) {
       if (socket.readyState === socket.OPEN) {
@@ -97,7 +112,13 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
 
         // Resolve @mention strategy context for this turn
         const lastUserMsg = clientMsg.messages.find(m => m.role === "user");
+
+        let broker: BrokerAdapter | null = null;
+        try { broker = getBrokerAdapter(); } catch { /* not configured */ }
+
+        const baseSystemPrompt = buildSystemPrompt(broker) + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
         let turnSystemPrompt = baseSystemPrompt;
+
         if (lastUserMsg) {
           const mentionPattern = /@([\w\s-]+)/g;
           const matches = [...String(lastUserMsg.content).matchAll(mentionPattern)];
@@ -121,9 +142,7 @@ ${resolved.plan}
           }
         }
 
-        let dhanClient: DhanClient | null = null;
-        try { dhanClient = getDhanClient(); } catch { /* not configured */ }
-        await runClaudeLoop(dhanClient, conversationHistory, pendingApprovals, send, turnSystemPrompt, localTools, opts.approvals, opts.trades);
+        await runClaudeLoop(broker, conversationHistory, pendingApprovals, send, turnSystemPrompt, localTools, opts.approvals, opts.trades);
         await opts.store.append(conversationId, conversationHistory.slice(saveFrom));
       }
     });
@@ -144,15 +163,15 @@ ${resolved.plan}
 async function runTool(
   toolDef: ToolDefinition,
   args: Record<string, unknown>,
-  dhanClient: DhanClient | null
+  broker: BrokerAdapter | null
 ): Promise<{ result: string; isError: boolean; tokenExpired: boolean }> {
   try {
-    const result = await toolDef.handler(args, dhanClient as DhanClient);
+    const result = await toolDef.handler(args, broker as BrokerAdapter);
     return { result, isError: false, tokenExpired: false };
   } catch (err) {
-    if (err instanceof DhanTokenExpiredError) {
+    if (err instanceof BrokerAuthError) {
       return {
-        result: "TOOL_ERROR: TOKEN_EXPIRED — Your Dhan session has expired. Please update your access token and restart the backend.",
+        result: "TOOL_ERROR: TOKEN_EXPIRED — Your broker session has expired. Please update your access token and restart the backend.",
         isError: true,
         tokenExpired: true,
       };
@@ -163,11 +182,11 @@ async function runTool(
 }
 
 async function runClaudeLoop(
-  dhanClient: DhanClient | null,
+  broker: BrokerAdapter | null,
   history: Anthropic.MessageParam[],
   pendingApprovals: Map<string, (approved: boolean) => void>,
   send: (msg: ServerMessage) => void,
-  systemPrompt: string = SYSTEM_PROMPT,
+  systemPrompt: string,
   localTools: Record<string, ToolDefinition> = {},
   approvals?: ApprovalStore,
   trades?: TradeStore
@@ -182,7 +201,7 @@ async function runClaudeLoop(
         model: "claude-sonnet-4-6",
         max_tokens: 8096,
         system: systemPrompt,
-        tools: getAllToolDefinitions(Object.values(localTools)),
+        tools: getAllToolDefinitions(Object.values(localTools), broker ?? undefined),
         messages: history,
       });
 
@@ -219,7 +238,7 @@ async function runClaudeLoop(
         const isHardOrderTrigger = toolUse.name === "register_trigger" && (args.action as Record<string, unknown>)?.type === "hard_order";
         if (toolDef && !toolDef.requiresApproval && !isHardOrderTrigger) {
           send({ type: "tool_use_start", tool: toolUse.name, args });
-          readOnlyPending.set(toolUse.id, runTool(toolDef, args, dhanClient));
+          readOnlyPending.set(toolUse.id, runTool(toolDef, args, broker));
         }
       }
 
@@ -255,7 +274,7 @@ async function runClaudeLoop(
           if (!approved) {
             result = "User denied this hard trigger.";
           } else {
-            const out = await runTool(toolDef, args, dhanClient);
+            const out = await runTool(toolDef, args, broker);
             result = out.result;
             isError = out.isError;
             if (out.tokenExpired) tokenExpired = true;
@@ -283,7 +302,7 @@ async function runClaudeLoop(
           if (!approved) {
             result = "User denied this action.";
           } else {
-            const out = await runTool(toolDef, args, dhanClient);
+            const out = await runTool(toolDef, args, broker);
             result = out.result;
             isError = out.isError;
             if (out.tokenExpired) tokenExpired = true;
@@ -297,7 +316,7 @@ async function runClaudeLoop(
                 const securityId = await getSecurityId(symbol).catch(() => "unknown");
                 const currentStatus = String(parsed["currentStatus"] ?? "").toUpperCase();
                 const initialStatus: import("../lib/storage/types.js").TradeStatus =
-                  currentStatus === "TRADED" || currentStatus === "PART_TRADED" ? "filled"
+                  currentStatus === "FILLED" || currentStatus === "TRADED" || currentStatus === "PART_TRADED" ? "filled"
                   : currentStatus === "REJECTED" ? "rejected"
                   : currentStatus === "CANCELLED" || currentStatus === "EXPIRED" ? "cancelled"
                   : "pending";

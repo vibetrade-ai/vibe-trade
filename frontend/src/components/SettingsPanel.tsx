@@ -159,6 +159,23 @@ export function SettingsPanel({ onSaved }: { onSaved?: () => void } = {}) {
         )}
       </div>
 
+      {/* Broker Selection */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <h2 className="text-sm font-semibold text-white mb-1">Broker</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <select
+              value="dhan"
+              disabled
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white"
+            >
+              <option value="dhan">Dhan</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">More brokers coming soon</p>
+          </div>
+        </div>
+      </div>
+
       {/* Connection Status */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
         <h2 className="text-sm font-semibold text-white mb-3">Connection Status</h2>

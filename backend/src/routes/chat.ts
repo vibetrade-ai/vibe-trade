@@ -4,10 +4,11 @@ import { randomUUID } from "crypto";
 import type { BrokerAdapter } from "../lib/brokers/types.js";
 import { getBrokerAdapter, getAnthropicClient } from "../lib/credentials.js";
 import { BrokerAuthError } from "../lib/brokers/errors.js";
-import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createPauseTriggerTool, createResumeTriggerTool, createGetTriggerRunsTool, createStrategyTools, createTradeTools } from "../lib/tools.js";
+import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createPauseTriggerTool, createResumeTriggerTool, createGetTriggerRunsTool, createStrategyTools, createTradeTools, createPortfolioTools } from "../lib/tools.js";
 import type { ClientMessage, ServerMessage } from "../types.js";
-import type { ConversationStore, MemoryStore, TriggerStore, TriggerAuditStore, ApprovalStore, StrategyStore, TradeStore } from "../lib/storage/index.js";
+import type { ConversationStore, MemoryStore, TriggerStore, TriggerAuditStore, ApprovalStore, StrategyStore, TradeStore, PortfolioStore } from "../lib/storage/index.js";
 import { getSecurityId } from "../lib/brokers/dhan/instruments.js";
+import { computeDeployedCapital } from "../lib/trade-utils.js";
 
 function buildSystemPrompt(broker: BrokerAdapter | null): string {
   const base = `You are VibeTrade, an AI-powered trading assistant connected to the user's brokerage account.
@@ -46,7 +47,7 @@ Available indices: ${caps.availableIndices.join(", ")}
   return base + brokerBlock;
 }
 
-export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; triggerAudit: TriggerAuditStore; approvals: ApprovalStore; strategies: StrategyStore; trades: TradeStore }) {
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; triggerAudit: TriggerAuditStore; approvals: ApprovalStore; strategies: StrategyStore; trades: TradeStore; portfolios?: PortfolioStore }) {
   fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
     const pendingApprovals = new Map<string, (approved: boolean) => void>();
     const conversationId =
@@ -62,6 +63,9 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
     const getTriggerRunsTool = createGetTriggerRunsTool(opts.triggerAudit);
     const strategyToolList = createStrategyTools(opts.strategies, opts.triggers, opts.trades);
     const tradeToolList = createTradeTools(opts.trades);
+    const portfolioToolList = opts.portfolios
+      ? createPortfolioTools(opts.portfolios, opts.triggers, opts.trades)
+      : [];
     const localTools: Record<string, ToolDefinition> = {
       update_memory: updateMemoryTool,
       register_trigger: registerTriggerTool,
@@ -75,6 +79,9 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
       localTools[t.definition.name] = t;
     }
     for (const t of tradeToolList) {
+      localTools[t.definition.name] = t;
+    }
+    for (const t of portfolioToolList) {
       localTools[t.definition.name] = t;
     }
     const memoryContent = await opts.memory.read();
@@ -130,7 +137,7 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
               const resolved = allStrategies.find(s => s.name.toLowerCase().includes(mentionName));
               if (resolved) {
                 strategyBlocks.push(`<strategy name="${resolved.name}">
-State: ${resolved.state}  |  Allocation: ₹${resolved.allocation.toLocaleString("en-IN")}
+State: ${resolved.state}
 
 ${resolved.plan}
 </strategy>`);
@@ -142,7 +149,7 @@ ${resolved.plan}
           }
         }
 
-        await runClaudeLoop(broker, conversationHistory, pendingApprovals, send, turnSystemPrompt, localTools, opts.approvals, opts.trades);
+        await runClaudeLoop(broker, conversationHistory, pendingApprovals, send, turnSystemPrompt, localTools, opts.approvals, opts.trades, opts.portfolios);
         await opts.store.append(conversationId, conversationHistory.slice(saveFrom));
       }
     });
@@ -160,7 +167,7 @@ ${resolved.plan}
 
 // Executes a tool and returns a result string. Never throws.
 // Returns isError=true so the caller can surface it to the frontend.
-async function runTool(
+export async function runTool(
   toolDef: ToolDefinition,
   args: Record<string, unknown>,
   broker: BrokerAdapter | null
@@ -181,7 +188,7 @@ async function runTool(
   }
 }
 
-async function runClaudeLoop(
+export async function runClaudeLoop(
   broker: BrokerAdapter | null,
   history: Anthropic.MessageParam[],
   pendingApprovals: Map<string, (approved: boolean) => void>,
@@ -189,7 +196,8 @@ async function runClaudeLoop(
   systemPrompt: string,
   localTools: Record<string, ToolDefinition> = {},
   approvals?: ApprovalStore,
-  trades?: TradeStore
+  trades?: TradeStore,
+  portfolios?: PortfolioStore
 ) {
   let tokenExpired = false;
 
@@ -285,6 +293,32 @@ async function runClaudeLoop(
         }
 
         if (toolDef.requiresApproval) {
+          // Capital enforcement for place_order attributed to a portfolio
+          if (toolUse.name === "place_order" && args.portfolio_id && portfolios && trades) {
+            const portfolioId = args.portfolio_id as string;
+            const portfolio = await portfolios.get(portfolioId).catch(() => null);
+            if (portfolio) {
+              const filledTrades = await trades.list({ portfolioId, status: "filled" });
+              const deployed = computeDeployedCapital(filledTrades);
+              const qty = args.quantity as number;
+              let price = args.price as number | undefined;
+              if (!price && broker) {
+                try {
+                  const quotes = await broker.getQuote([args.symbol as string]);
+                  price = Object.values(quotes)[0]?.lastPrice;
+                } catch { /* ignore */ }
+              }
+              const tradeCost = qty * (price ?? 0);
+              if (price && deployed + tradeCost > portfolio.allocation) {
+                const shortfall = +(deployed + tradeCost - portfolio.allocation).toFixed(2);
+                result = `Trade rejected: would exceed portfolio "${portfolio.name}" allocation of ₹${portfolio.allocation.toLocaleString("en-IN")}. Deployed: ₹${deployed.toFixed(2)}, Trade cost: ₹${tradeCost.toFixed(2)}, Shortfall: ₹${shortfall.toLocaleString("en-IN")}.`;
+                send({ type: "tool_use_result", tool: toolUse.name, result, isError: true });
+                toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+                continue;
+              }
+            }
+          }
+
           send({ type: "tool_use_start", tool: toolUse.name, args });
           const requestId = randomUUID();
           send({
@@ -337,6 +371,7 @@ async function runClaudeLoop(
                   rejectionReason: initialStatus === "rejected"
                     ? (parsed["rejectionReason"] as string | undefined) : undefined,
                   strategyId: args.strategy_id as string | undefined,
+                  portfolioId: args.portfolio_id as string | undefined,
                   note: args.note as string | undefined,
                   createdAt: new Date().toISOString(),
                 });

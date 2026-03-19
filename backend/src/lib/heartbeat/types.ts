@@ -76,6 +76,8 @@ export interface Trigger {
   nextFireAt?: string;
   /** Updated after each firing (used for cooldown check) */
   lastFiredAt?: string;
+  /** Portfolio this trigger is attributed to */
+  portfolioId?: string;
 }
 
 export interface QuoteEntry {
@@ -150,6 +152,8 @@ export interface TriggerAuditEntry {
     | { type: "reasoning_job_no_action"; reason: string }
     | { type: "reasoning_job_completed"; summary: string; approvalIds: string[]; durationMs: number };
   strategyId?: string;
+  portfolioId?: string;
+  reasoningSummary?: string;
 }
 
 export interface EventDelta {

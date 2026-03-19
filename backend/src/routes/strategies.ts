@@ -1,8 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import type { StrategyStore, TriggerStore, TradeStore, TradeRecord } from "../lib/storage/index.js";
-import { getBrokerAdapter } from "../lib/credentials.js";
-import { computeOpenPositions, computeRealizedPnl } from "../lib/trade-utils.js";
-import { syncOrders } from "../lib/brokers/dhan/order-sync.js";
+import type { StrategyStore, TriggerStore, TradeStore } from "../lib/storage/index.js";
+import { computeOpenPositions } from "../lib/trade-utils.js";
 
 export async function strategiesRoute(
   fastify: FastifyInstance,
@@ -32,7 +30,6 @@ export async function strategiesRoute(
       name: body.name as string,
       description: body.description as string,
       plan: body.plan as string,
-      allocation: body.allocation as number,
       state: (body.state as string ?? "scanning") as import("../lib/storage/types.js").StrategyState,
       status: "active" as const,
       createdAt: now,
@@ -113,84 +110,4 @@ export async function strategiesRoute(
     };
   });
 
-  // GET /api/strategies/:id/trades — raw trade records for a strategy
-  fastify.get("/api/strategies/:id/trades", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const strategy = await opts.strategies.get(id);
-    if (!strategy) { reply.code(404); return { error: "Not found" }; }
-    return opts.trades.list({ strategyId: id });
-  });
-
-  // GET /api/strategies/:id/performance — aggregated P&L stats
-  fastify.get("/api/strategies/:id/performance", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const strategy = await opts.strategies.get(id);
-    if (!strategy) { reply.code(404); return { error: "Not found" }; }
-
-    const allTrades = await opts.trades.list({ strategyId: id });
-    const filled = allTrades.filter(t => t.status === "filled");
-    const buys = filled.filter(t => t.transactionType === "BUY");
-    const sells = filled.filter(t => t.transactionType === "SELL");
-    const sellsWithPnl = sells.filter(t => t.realizedPnl !== undefined);
-
-    const totalRealizedPnl = +sellsWithPnl.reduce((s, t) => s + t.realizedPnl!, 0).toFixed(2);
-    const winRate = sellsWithPnl.length > 0
-      ? +(sellsWithPnl.filter(t => t.realizedPnl! > 0).length / sellsWithPnl.length).toFixed(2)
-      : null;
-    const bestTrade = sellsWithPnl.reduce<TradeRecord | null>((b, t) => !b || t.realizedPnl! > b.realizedPnl! ? t : b, null);
-    const worstTrade = sellsWithPnl.reduce<TradeRecord | null>((w, t) => !w || t.realizedPnl! < w.realizedPnl! ? t : w, null);
-
-    // Open positions: net qty per symbol from filled trades
-    const openPositions = computeOpenPositions(filled);
-
-    const deployedCapital = openPositions.reduce((s, p) => s + p.deployedCapital, 0);
-
-    return {
-      strategyId: id,
-      strategyName: strategy.name,
-      allocation: strategy.allocation,
-      deployedCapital: +deployedCapital.toFixed(2),
-      totalTrades: allTrades.length,
-      filledTrades: filled.length,
-      pendingTrades: allTrades.filter(t => t.status === "pending").length,
-      buyTrades: buys.length,
-      sellTrades: sells.length,
-      totalRealizedPnl,
-      winRate,
-      bestTrade: bestTrade ? { symbol: bestTrade.symbol, pnl: bestTrade.realizedPnl!, date: bestTrade.filledAt } : null,
-      worstTrade: worstTrade ? { symbol: worstTrade.symbol, pnl: worstTrade.realizedPnl!, date: worstTrade.filledAt } : null,
-      openPositions,
-    };
-  });
-
-  // POST /api/trades/sync — pull broker tradebook and update pending records
-  fastify.post("/api/trades/sync", async (_request, reply) => {
-    let broker;
-    try {
-      broker = getBrokerAdapter();
-    } catch {
-      reply.code(503);
-      return { error: "Broker credentials not configured" };
-    }
-
-    let tradebookEntries = 0;
-    try {
-      const tradebook = await broker.getTradebook();
-      tradebookEntries = Array.isArray(tradebook) ? tradebook.length : 0;
-    } catch (err) {
-      console.error("[trades/sync] tradebook fetch failed:", err);
-    }
-    const { fillsUpdated: updated } = await syncOrders(broker, opts.trades);
-    return { tradebookEntries, updated };
-  });
-
-  // GET /api/trades — all trades, optionally filtered
-  fastify.get("/api/trades", async (request) => {
-    const q = request.query as { strategyId?: string; symbol?: string; status?: string };
-    return opts.trades.list({
-      strategyId: q.strategyId,
-      symbol: q.symbol,
-      status: q.status as import("../lib/storage/types.js").TradeStatus | undefined,
-    });
-  });
 }

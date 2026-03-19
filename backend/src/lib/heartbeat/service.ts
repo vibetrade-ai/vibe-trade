@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import type { BrokerAdapter } from "../brokers/types.js";
-import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore, TradeStore } from "../storage/index.js";
+import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore, TradeStore, PortfolioStore } from "../storage/index.js";
+import { computeDeployedCapital } from "../trade-utils.js";
 import { buildSnapshot } from "./snapshot.js";
 import { evaluateCodeTriggers, evaluateLlmTriggers, evaluateTimeTriggers } from "./evaluator.js";
 import { evaluateEventTriggers } from "./event-evaluator.js";
@@ -31,6 +32,7 @@ export class HeartbeatService {
     private readonly intervalMs: number = 60_000,
     private readonly strategyStore?: StrategyStore,
     private readonly tradeStore?: TradeStore,
+    private readonly portfolioStore?: PortfolioStore,
   ) {}
 
   setBrokerAdapter(adapter: BrokerAdapter): void {
@@ -248,6 +250,36 @@ export class HeartbeatService {
         }
 
         if (trigger.action.type === "hard_order") {
+          // Capital enforcement: reject if portfolio allocation would be exceeded
+          if (trigger.portfolioId && this.portfolioStore && this.tradeStore) {
+            const portfolio = await this.portfolioStore.get(trigger.portfolioId).catch(() => null);
+            if (portfolio) {
+              const filledTrades = await this.tradeStore.list({ portfolioId: portfolio.id, status: "filled" });
+              const deployed = computeDeployedCapital(filledTrades);
+              const tradeArgs = trigger.action.tradeArgs;
+              let price = tradeArgs.price;
+              if (!price) {
+                try {
+                  const quotes = await this.broker.getQuote([tradeArgs.symbol]);
+                  price = Object.values(quotes)[0]?.lastPrice;
+                } catch { /* ignore */ }
+              }
+              const tradeCost = tradeArgs.quantity * (price ?? 0);
+              if (price && deployed + tradeCost > portfolio.allocation) {
+                const shortfall = +(deployed + tradeCost - portfolio.allocation).toFixed(2);
+                const reason = `Capital limit exceeded for portfolio "${portfolio.name}": deployed ₹${deployed.toFixed(2)} + trade ₹${tradeCost.toFixed(2)} > allocation ₹${portfolio.allocation}. Shortfall: ₹${shortfall}.`;
+                console.warn(`[heartbeat] hard_order blocked: ${reason}`);
+                await this.triggerAudit.append({
+                  id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+                  firedAt: nowIso, snapshotAtFire: snapshot, action: trigger.action,
+                  outcome: { type: "hard_order_failed", error: reason },
+                  portfolioId: trigger.portfolioId,
+                });
+                continue;
+              }
+            }
+          }
+
           // Mark as fired immediately (hard orders are always one-shot)
           await this.triggers.setStatus(trigger.id, "fired", { firedAt: nowIso });
           try {
@@ -280,6 +312,7 @@ export class HeartbeatService {
                 requestedPrice: tradeArgs.price,
                 status: "pending",
                 strategyId: trigger.strategyId,
+                portfolioId: trigger.portfolioId,
                 note: `Auto-placed by trigger: ${trigger.name}`,
                 createdAt: nowIso,
               });
@@ -331,7 +364,7 @@ export class HeartbeatService {
 
           this.activeJobs++;
           console.log(`[heartbeat] reasoning job started for trigger ${trigger.id}`);
-          runReasoningJob(trigger, snapshot, this.broker, this.triggers, this.approvals, this.triggerAudit, this.memory, this.strategyStore)
+          runReasoningJob(trigger, snapshot, this.broker, this.triggers, this.approvals, this.triggerAudit, this.memory, this.strategyStore, this.portfolioStore, this.tradeStore)
             .catch(async err => {
               const error = err instanceof Error ? err.message : String(err);
               console.error(`[heartbeat] reasoning job error for ${trigger.id}:`, err);

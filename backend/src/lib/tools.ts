@@ -1,7 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { parseExpression } from "cron-parser";
 import type { BrokerAdapter, BrokerCapabilities, CandleInterval } from "./brokers/types.js";
-import type { MemoryStore, TriggerStore, TriggerAuditStore, StrategyStore, TradeStore } from "./storage/index.js";
+import type { MemoryStore, TriggerStore, TriggerAuditStore, StrategyStore, TradeStore, PortfolioStore } from "./storage/index.js";
 import type { TradeArgs } from "./heartbeat/types.js";
 import {
   searchInstruments,
@@ -785,7 +785,8 @@ Examples:
           staleAfterMs: { type: "number", description: "For cron/time triggers: how many ms after the scheduled time the job is considered stale and should be skipped. Max 7200000 (2 hours)." },
           recurring: { type: "boolean", description: "For code/llm/event triggers: if true, re-arms after firing (combined with cooldownMs to prevent spam)" },
           cooldownMs: { type: "number", description: "For recurring code/llm/event triggers: minimum ms between firings" },
-          strategy_id: { type: "string", description: "Optional strategy ID to link this trigger to a strategy" },
+          strategy_id: { type: "string", description: "Optional strategy ID to link this trigger to a strategy (soft reference for backward compat)" },
+          portfolio_id: { type: "string", description: "Optional portfolio ID to attribute trades and enforce capital limits from this trigger" },
           context: { type: "string", description: "Optional inline context/goal for the reasoning job (in addition to prompt). Useful for adding strategy-specific hints." },
         },
         required: ["name", "scope", "watchSymbols", "condition", "action"],
@@ -836,6 +837,7 @@ Examples:
         active: true,
         status: "active" as const,
         ...(args.strategy_id ? { strategyId: args.strategy_id as string } : {}),
+        ...(args.portfolio_id ? { portfolioId: args.portfolio_id as string } : {}),
         ...(args.context ? { context: args.context as string } : {}),
         ...(args.tradingDaysOnly != null ? { tradingDaysOnly: args.tradingDaysOnly as boolean } : {}),
         ...(staleAfterMs != null ? { staleAfterMs } : {}),
@@ -1035,18 +1037,19 @@ export function createStrategyTools(
     requiresApproval: false,
     definition: {
       name: "create_strategy",
-      description: `Create a named trading strategy with a capital allocation and a written plan.
+      description: `Create a named trading strategy document with a written plan.
 
-The plan field should describe the full trading policy: objectives, entry/exit signals, position sizing, and risk rules. After creating a strategy, analyze the plan text and propose concrete triggers that would implement it (use register_trigger with cron condition for recurring analysis). Describe each one, ask the user to confirm, and if confirmed call register_trigger linked to this strategy's id.`,
+The plan field should describe the full trading policy: objectives, entry/exit signals, position sizing, and risk rules. After creating a strategy, analyze the plan text and propose concrete triggers that would implement it (use register_trigger with cron condition for recurring analysis). Describe each one, ask the user to confirm, and if confirmed call register_trigger linked to this strategy's id.
+
+Note: strategies are pure documents — capital allocation belongs on a Portfolio. If the user wants to allocate capital, create a portfolio and attach this strategy to it.`,
       input_schema: {
         type: "object",
         properties: {
           name: { type: "string", description: "Short strategy name, e.g. 'Large-Cap Momentum'" },
           description: { type: "string", description: "One-sentence summary of what the strategy does" },
           plan: { type: "string", description: "Full trading plan text: objectives, entry/exit signals, position sizing, risk rules" },
-          allocation: { type: "number", description: "Capital envelope in INR, e.g. 500000 for ₹5L" },
         },
-        required: ["name", "description", "plan", "allocation"],
+        required: ["name", "description", "plan"],
       },
     },
     handler: async (args) => {
@@ -1057,7 +1060,6 @@ The plan field should describe the full trading policy: objectives, entry/exit s
         name: args.name as string,
         description: args.description as string,
         plan: args.plan as string,
-        allocation: args.allocation as number,
         state: "scanning" as const,
         status: "active" as const,
         createdAt: now,
@@ -1232,68 +1234,180 @@ export function createTradeTools(store: TradeStore): ToolDefinition[] {
     },
   };
 
-  const getStrategyPerformance: ToolDefinition = {
+  return [getTradeHistory, syncTradebook];
+}
+
+// ── PORTFOLIO TOOLS ───────────────────────────────────────────────────────────
+
+export function createPortfolioTools(
+  portfolioStore: PortfolioStore,
+  triggerStore?: TriggerStore,
+  tradeStore?: TradeStore,
+): ToolDefinition[] {
+  const createPortfolio: ToolDefinition = {
     requiresApproval: false,
     definition: {
-      name: "get_strategy_performance",
-      description: "Get aggregated P&L, win rate, trade count, and open positions for a strategy. Pass no strategy_id to get overall portfolio performance.",
+      name: "create_portfolio",
+      description: "Create a portfolio with a capital allocation. Portfolios enforce capital limits in code — trades attributed to a portfolio will be rejected if they would exceed the allocation. Attach strategy documents to a portfolio to provide context to its reasoning jobs.",
       input_schema: {
         type: "object",
         properties: {
-          strategy_id: { type: "string", description: "Strategy ID. Omit for overall portfolio stats." },
+          name: { type: "string", description: "Portfolio name, e.g. 'Auto Basket'" },
+          description: { type: "string", description: "What this portfolio is for" },
+          allocation: { type: "number", description: "Capital envelope in INR, e.g. 1000000 for ₹10L" },
+          benchmark: { type: "string", description: "Optional index symbol for comparison, e.g. 'NIFTYAUTO'" },
         },
-        required: [],
+        required: ["name", "description", "allocation"],
       },
     },
     handler: async (args) => {
-      const strategyId = args.strategy_id as string | undefined;
-      const trades = await store.list({ strategyId, status: "filled" });
-      const allTrades = await store.list({ strategyId });
+      const { randomUUID } = await import("crypto");
+      const now = new Date().toISOString();
+      const portfolio = {
+        id: randomUUID(),
+        name: args.name as string,
+        description: args.description as string,
+        allocation: args.allocation as number,
+        benchmark: args.benchmark as string | undefined,
+        strategyIds: [] as string[],
+        status: "active" as const,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await portfolioStore.upsert(portfolio);
+      return JSON.stringify({ success: true, portfolioId: portfolio.id, name: portfolio.name });
+    },
+  };
 
-      const buys = trades.filter(t => t.transactionType === "BUY");
-      const sells = trades.filter(t => t.transactionType === "SELL");
+  const listPortfolios: ToolDefinition = {
+    requiresApproval: false,
+    definition: {
+      name: "list_portfolios",
+      description: "List all active portfolios.",
+      input_schema: { type: "object", properties: {} },
+    },
+    handler: async () => {
+      const portfolios = await portfolioStore.list({ status: "active" });
+      if (portfolios.length === 0) return "No active portfolios found.";
+      return JSON.stringify(portfolios, null, 2);
+    },
+  };
+
+  const getPortfolioPerformance: ToolDefinition = {
+    requiresApproval: false,
+    definition: {
+      name: "get_portfolio_performance",
+      description: "Get aggregated P&L, win rate, deployed capital, and open positions for a portfolio.",
+      input_schema: {
+        type: "object",
+        properties: {
+          portfolio_id: { type: "string", description: "Portfolio ID" },
+        },
+        required: ["portfolio_id"],
+      },
+    },
+    handler: async (args) => {
+      if (!tradeStore) return JSON.stringify({ error: "Trade store not available" });
+      const portfolioId = args.portfolio_id as string;
+      const portfolio = await portfolioStore.get(portfolioId);
+      if (!portfolio) return JSON.stringify({ error: `Portfolio ${portfolioId} not found` });
+
+      const { computeOpenPositions } = await import("./trade-utils.js");
+      const allTrades = await tradeStore.list({ portfolioId });
+      const filled = allTrades.filter(t => t.status === "filled");
+      const sells = filled.filter(t => t.transactionType === "SELL");
       const sellsWithPnl = sells.filter(t => t.realizedPnl !== undefined);
 
       const totalRealizedPnl = +sellsWithPnl.reduce((s, t) => s + t.realizedPnl!, 0).toFixed(2);
-      const winningTrades = sellsWithPnl.filter(t => t.realizedPnl! > 0);
-      const winRate = sellsWithPnl.length > 0 ? +(winningTrades.length / sellsWithPnl.length).toFixed(2) : null;
-      const bestTrade = sellsWithPnl.reduce<import("./storage/types.js").TradeRecord | null>((best, t) => !best || t.realizedPnl! > best.realizedPnl! ? t : best, null);
-      const worstTrade = sellsWithPnl.reduce<import("./storage/types.js").TradeRecord | null>((worst, t) => !worst || t.realizedPnl! < worst.realizedPnl! ? t : worst, null);
-
-      // Open positions: net BUY qty - SELL qty per symbol (filled trades only)
-      const netQty: Record<string, { quantity: number; totalCost: number }> = {};
-      for (const t of trades) {
-        if (!netQty[t.symbol]) netQty[t.symbol] = { quantity: 0, totalCost: 0 };
-        if (t.transactionType === "BUY") {
-          netQty[t.symbol].quantity += t.quantity;
-          netQty[t.symbol].totalCost += (t.executedPrice ?? 0) * t.quantity;
-        } else {
-          netQty[t.symbol].quantity -= t.quantity;
-        }
-      }
-      const openPositions = Object.entries(netQty)
-        .filter(([, v]) => v.quantity > 0)
-        .map(([symbol, v]) => ({
-          symbol,
-          quantity: v.quantity,
-          avgBuyPrice: v.quantity > 0 ? +(v.totalCost / v.quantity).toFixed(2) : 0,
-        }));
+      const winRate = sellsWithPnl.length > 0
+        ? +(sellsWithPnl.filter(t => t.realizedPnl! > 0).length / sellsWithPnl.length).toFixed(2)
+        : null;
+      const openPositions = computeOpenPositions(filled);
+      const deployedCapital = openPositions.reduce((s, p) => s + p.deployedCapital, 0);
 
       return JSON.stringify({
-        strategyId: strategyId ?? "all",
+        portfolioId,
+        portfolioName: portfolio.name,
+        allocation: portfolio.allocation,
+        deployedCapital: +deployedCapital.toFixed(2),
+        availableCapital: +(portfolio.allocation - deployedCapital).toFixed(2),
         totalTrades: allTrades.length,
-        filledTrades: trades.length,
-        pendingTrades: allTrades.filter(t => t.status === "pending").length,
-        buyTrades: buys.length,
-        sellTrades: sells.length,
+        filledTrades: filled.length,
         totalRealizedPnl,
         winRate,
-        bestTrade: bestTrade ? { symbol: bestTrade.symbol, pnl: bestTrade.realizedPnl, date: bestTrade.filledAt } : null,
-        worstTrade: worstTrade ? { symbol: worstTrade.symbol, pnl: worstTrade.realizedPnl, date: worstTrade.filledAt } : null,
         openPositions,
       }, null, 2);
     },
   };
 
-  return [getTradeHistory, syncTradebook, getStrategyPerformance];
+  const attachStrategyToPortfolio: ToolDefinition = {
+    requiresApproval: false,
+    definition: {
+      name: "attach_strategy_to_portfolio",
+      description: "Attach a strategy document to a portfolio. The strategy's plan text will be injected as context in the portfolio's reasoning jobs.",
+      input_schema: {
+        type: "object",
+        properties: {
+          portfolio_id: { type: "string", description: "Portfolio ID" },
+          strategy_id: { type: "string", description: "Strategy ID to attach" },
+        },
+        required: ["portfolio_id", "strategy_id"],
+      },
+    },
+    handler: async (args) => {
+      const { portfolio_id, strategy_id } = args as { portfolio_id: string; strategy_id: string };
+      const portfolio = await portfolioStore.get(portfolio_id);
+      if (!portfolio) return JSON.stringify({ error: `Portfolio ${portfolio_id} not found` });
+      await portfolioStore.addStrategy(portfolio_id, strategy_id);
+      return JSON.stringify({ success: true, portfolioId: portfolio_id, strategyId: strategy_id });
+    },
+  };
+
+  const archivePortfolio: ToolDefinition = {
+    requiresApproval: false,
+    definition: {
+      name: "archive_portfolio",
+      description: "Archive a portfolio. Warns if open positions exist. Pauses all linked triggers.",
+      input_schema: {
+        type: "object",
+        properties: {
+          portfolio_id: { type: "string", description: "Portfolio ID to archive" },
+        },
+        required: ["portfolio_id"],
+      },
+    },
+    handler: async (args) => {
+      const { portfolio_id } = args as { portfolio_id: string };
+      const portfolio = await portfolioStore.get(portfolio_id);
+      if (!portfolio) return JSON.stringify({ error: `Portfolio ${portfolio_id} not found` });
+
+      // Guard: warn if open positions
+      if (tradeStore) {
+        const { computeOpenPositions } = await import("./trade-utils.js");
+        const filled = await tradeStore.list({ portfolioId: portfolio_id, status: "filled" });
+        const openPositions = computeOpenPositions(filled);
+        if (openPositions.length > 0) {
+          return JSON.stringify({
+            error: "Portfolio has open positions",
+            openPositions: openPositions.map(p => ({ symbol: p.symbol, quantity: p.quantity })),
+            hint: "Close all attributed positions in the broker before archiving",
+          });
+        }
+      }
+
+      // Cascade: pause linked triggers
+      let triggersPaused = 0;
+      if (triggerStore) {
+        const linked = await triggerStore.list({ status: ["active"] });
+        const portfolioTriggers = linked.filter(t => t.portfolioId === portfolio_id);
+        await Promise.all(portfolioTriggers.map(t => triggerStore.setStatus(t.id, "paused")));
+        triggersPaused = portfolioTriggers.length;
+      }
+
+      await portfolioStore.setStatus(portfolio_id, "archived");
+      return JSON.stringify({ success: true, portfolioId: portfolio_id, status: "archived", triggersPaused });
+    },
+  };
+
+  return [createPortfolio, listPortfolios, getPortfolioPerformance, attachStrategyToPortfolio, archivePortfolio];
 }

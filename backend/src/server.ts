@@ -12,6 +12,7 @@ import { conversationsRoute } from "./routes/conversations.js";
 import { approvalsRoute } from "./routes/approvals.js";
 import { triggersRoute } from "./routes/triggers.js";
 import { strategiesRoute } from "./routes/strategies.js";
+import { portfoliosRoute } from "./routes/portfolios.js";
 import { settingsRoute } from "./routes/settings.js";
 import { createStorageProvider } from "./lib/storage/index.js";
 import { credentialsStore, getBrokerAdapter } from "./lib/credentials.js";
@@ -134,7 +135,12 @@ async function start() {
   await fastify.register(fastifyCors, {
     origin: serveStatic
       ? true
-      : (process.env.FRONTEND_URL ?? "http://localhost:3000"),
+      : (origin: string | undefined, callback: (err: Error | null, allow: boolean) => void) => {
+          const allowed = (process.env.FRONTEND_URLS ?? "http://localhost:3000,http://localhost:3002,http://localhost:3003")
+            .split(",").map((u: string) => u.trim());
+          if (!origin || allowed.includes(origin)) callback(null, true);
+          else callback(new Error("Not allowed by CORS"), false);
+        },
     methods: ["GET", "POST", "PATCH", "DELETE"],
   });
 
@@ -150,11 +156,13 @@ async function start() {
     approvals: storage.approvals,
     strategies: storage.strategies,
     trades: storage.trades,
+    portfolios: storage.portfolios,
   });
   await fastify.register(conversationsRoute, { store: storage.conversations });
   await fastify.register(approvalsRoute, { approvals: storage.approvals, triggers: storage.triggers });
   await fastify.register(triggersRoute, { triggers: storage.triggers, triggerAudit: storage.triggerAudit });
   await fastify.register(strategiesRoute, { strategies: storage.strategies, triggers: storage.triggers, trades: storage.trades });
+  await fastify.register(portfoliosRoute, { portfolios: storage.portfolios, triggers: storage.triggers, trades: storage.trades });
 
   fastify.get("/health", async () => ({ ok: true }));
 
@@ -182,7 +190,7 @@ async function start() {
   let heartbeat: HeartbeatService | null = null;
   try {
     const broker = getBrokerAdapter();
-    heartbeat = new HeartbeatService(broker, storage.triggers, storage.approvals, storage.triggerAudit, storage.memory, 60_000, storage.strategies, storage.trades);
+    heartbeat = new HeartbeatService(broker, storage.triggers, storage.approvals, storage.triggerAudit, storage.memory, 60_000, storage.strategies, storage.trades, storage.portfolios);
     heartbeat.start();
   } catch (err) {
     console.warn("[heartbeat] Failed to start (broker credentials not configured):", (err as Error).message);

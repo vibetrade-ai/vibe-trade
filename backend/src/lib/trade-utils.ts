@@ -39,6 +39,14 @@ export function computeOpenPositions(trades: TradeRecord[]): OpenPosition[] {
 }
 
 /**
+ * Compute total deployed capital across open positions (filled BUYs minus filled SELLs × avg buy price).
+ */
+export function computeDeployedCapital(trades: TradeRecord[]): number {
+  const openPositions = computeOpenPositions(trades);
+  return openPositions.reduce((s, p) => s + p.deployedCapital, 0);
+}
+
+/**
  * Compute realized P&L for a SELL fill given prior filled BUYs for the
  * same symbol (already filtered to matching strategyId if applicable).
  */

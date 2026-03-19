@@ -9,11 +9,33 @@ export interface Strategy {
   name: string;
   description: string;
   plan: string;
-  allocation: number;
   state: StrategyState;
   status: StrategyStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export type PortfolioStatus = "active" | "paused" | "archived";
+
+export interface Portfolio {
+  id: string;
+  name: string;
+  description: string;
+  allocation: number;
+  benchmark?: string;
+  strategyIds: string[];
+  status: PortfolioStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PortfolioStore {
+  list(filter?: { status?: PortfolioStatus | PortfolioStatus[] }): Promise<Portfolio[]>;
+  get(id: string): Promise<Portfolio | null>;
+  upsert(portfolio: Portfolio): Promise<void>;
+  setStatus(id: string, status: PortfolioStatus): Promise<void>;
+  addStrategy(portfolioId: string, strategyId: string): Promise<void>;
+  removeStrategy(portfolioId: string, strategyId: string): Promise<void>;
 }
 
 export interface StrategyStore {
@@ -78,6 +100,7 @@ export interface TradeRecord {
   executedPrice?: number;
   status: TradeStatus;
   strategyId?: string;
+  portfolioId?: string;
   note?: string;
   realizedPnl?: number;
   createdAt: string;
@@ -89,6 +112,7 @@ export interface TradeStore {
   append(trade: TradeRecord): Promise<void>;
   list(filter?: {
     strategyId?: string;
+    portfolioId?: string;
     symbol?: string;
     fromDate?: string;
     toDate?: string;
@@ -112,4 +136,5 @@ export interface StorageProvider {
   strategies: StrategyStore;
   trades: TradeStore;
   credentials: CredentialsStore;
+  portfolios: PortfolioStore;
 }

@@ -1,7 +1,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "crypto";
 import type { BrokerAdapter } from "../brokers/types.js";
-import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore } from "../storage/index.js";
+import type { TriggerStore, ApprovalStore, TriggerAuditStore, MemoryStore, StrategyStore, PortfolioStore, TradeStore } from "../storage/index.js";
+import { computeDeployedCapital } from "../trade-utils.js";
 import type { Trigger, SystemSnapshot, TradeArgs } from "./types.js";
 import { TOOLS } from "../tools.js";
 import { getAnthropicClient } from "../credentials.js";
@@ -201,14 +202,54 @@ export async function runReasoningJob(
   auditStore: TriggerAuditStore,
   memory: MemoryStore,
   strategyStore?: StrategyStore,
+  portfolioStore?: PortfolioStore,
+  tradeStore?: TradeStore,
 ): Promise<void> {
   const startedAt = Date.now();
 
   const memoryContent = await memory.read().catch(() => "");
   let systemPrompt = RUNNER_SYSTEM + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
 
-  // Inject strategy context if trigger is linked to a strategy
-  if (trigger.strategyId && strategyStore) {
+  // Inject portfolio context (primary) if trigger has portfolioId
+  if (trigger.portfolioId && portfolioStore) {
+    const portfolio = await portfolioStore.get(trigger.portfolioId).catch(() => null);
+    if (portfolio) {
+      if (portfolio.status === "archived") {
+        console.warn(`[heartbeat] trigger ${trigger.id} linked to archived portfolio ${trigger.portfolioId} — cancelling`);
+        await triggerStore.setStatus(trigger.id, "cancelled");
+        return;
+      }
+
+      // Compute available capital
+      let deployedCapital = 0;
+      if (tradeStore) {
+        const filledTrades = await tradeStore.list({ portfolioId: portfolio.id, status: "filled" });
+        deployedCapital = computeDeployedCapital(filledTrades);
+      }
+      const availableCapital = portfolio.allocation - deployedCapital;
+
+      // Inject attached strategy plans
+      const strategyBlocks: string[] = [];
+      if (strategyStore && portfolio.strategyIds.length > 0) {
+        for (const sid of portfolio.strategyIds) {
+          const strategy = await strategyStore.get(sid).catch(() => null);
+          if (strategy && strategy.status !== "archived") {
+            strategyBlocks.push(`<strategy name="${strategy.name}">
+State: ${strategy.state}
+
+${strategy.plan}
+</strategy>`);
+          }
+        }
+      }
+
+      systemPrompt += `\n\n<portfolio name="${portfolio.name}">
+Allocation: ₹${portfolio.allocation.toLocaleString("en-IN")}  |  Deployed: ₹${deployedCapital.toFixed(2)}  |  Available: ₹${availableCapital.toFixed(2)}${portfolio.benchmark ? `  |  Benchmark: ${portfolio.benchmark}` : ""}
+${strategyBlocks.length > 0 ? "\n" + strategyBlocks.join("\n") : ""}
+</portfolio>`;
+    }
+  } else if (trigger.strategyId && strategyStore) {
+    // Backward compat: inject strategy context for triggers created before portfolio refactor
     const strategy = await strategyStore.get(trigger.strategyId).catch(() => null);
     if (strategy) {
       if (strategy.status === "archived") {
@@ -221,20 +262,14 @@ export async function runReasoningJob(
       const triggersBlock = linkedTriggers.length > 0
         ? linkedTriggers.map(t => `- "${t.name}": ${JSON.stringify(t.condition)} → ${t.action.type}`).join("\n")
         : "None";
-      const availableBalance = snapshot.funds?.availableBalance ?? null;
-      const fundsLine = availableBalance !== null
-        ? `Available balance: ₹${availableBalance.toLocaleString("en-IN")}  |  Allocation: ₹${strategy.allocation.toLocaleString("en-IN")}${availableBalance < strategy.allocation ? "  ⚠️ Balance is below strategy allocation" : ""}`
-        : `Allocation: ₹${strategy.allocation.toLocaleString("en-IN")}  (live balance unavailable)`;
       systemPrompt += `\n\n<strategy name="${strategy.name}">
-State: ${strategy.state}  |  ${fundsLine}
+State: ${strategy.state}
 
 ## Plan
 ${strategy.plan}
 
 ## Active Triggers
 ${triggersBlock}
-
-IMPORTANT: Before queuing any trade, confirm the required capital does not exceed the available balance shown above. If funds are insufficient, call no_action with a clear reason.
 </strategy>`;
     }
   }
@@ -492,12 +527,33 @@ Analyze the situation and take appropriate action.`;
     const durationMs = Date.now() - startedAt;
     const isCron = !!(trigger.condition as { mode: string; cron?: string }).cron;
 
+    // Extract reasoning summary from last assistant text block in history
+    let reasoningSummary: string | undefined;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i];
+      if (msg.role === "assistant") {
+        const content = Array.isArray(msg.content) ? msg.content : [];
+        const textBlocks = content.filter((b: { type: string }) => b.type === "text") as { type: "text"; text: string }[];
+        const textBlock = textBlocks[textBlocks.length - 1];
+        if (textBlock?.text) {
+          reasoningSummary = textBlock.text.slice(0, 500);
+        }
+        break;
+      }
+    }
+
+    const auditBase = {
+      id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
+      firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+      ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+      ...(trigger.portfolioId ? { portfolioId: trigger.portfolioId } : {}),
+      ...(reasoningSummary ? { reasoningSummary } : {}),
+    };
+
     if (lastNoActionReason) {
       await auditStore.append({
-        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        ...auditBase,
         outcome: { type: "reasoning_job_no_action", reason: lastNoActionReason },
-        ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
       });
     } else if (isCron || approvalIds.length > 0) {
       // Use richer completed outcome for cron runs or multi-approval runs
@@ -505,18 +561,14 @@ Analyze the situation and take appropriate action.`;
         ? lastSummary || `Queued ${approvalIds.length} approval(s)`
         : "Completed with no explicit actions";
       await auditStore.append({
-        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        ...auditBase,
         outcome: { type: "reasoning_job_completed", summary, approvalIds, durationMs },
-        ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
       });
     } else {
       // Single approval or no action for legacy triggers
       await auditStore.append({
-        id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
-        firedAt: snapshot.capturedAt, snapshotAtFire: snapshot, action: trigger.action,
+        ...auditBase,
         outcome: { type: "reasoning_job_queued", approvalId: approvalIds[0] },
-        ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
       });
     }
 

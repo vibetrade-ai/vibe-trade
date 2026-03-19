@@ -19,6 +19,7 @@ export class LocalTradeStore extends JsonArrayStore<TradeRecord> implements Trad
 
   async list(filter?: {
     strategyId?: string;
+    portfolioId?: string;
     symbol?: string;
     fromDate?: string;
     toDate?: string;
@@ -26,6 +27,7 @@ export class LocalTradeStore extends JsonArrayStore<TradeRecord> implements Trad
   }): Promise<TradeRecord[]> {
     let all = await this.load();
     if (filter?.strategyId) all = all.filter(t => t.strategyId === filter.strategyId);
+    if (filter?.portfolioId) all = all.filter(t => t.portfolioId === filter.portfolioId);
     if (filter?.symbol) all = all.filter(t => t.symbol === filter.symbol!.toUpperCase());
     if (filter?.status) all = all.filter(t => t.status === filter.status);
     if (filter?.fromDate) all = all.filter(t => t.createdAt >= filter.fromDate!);

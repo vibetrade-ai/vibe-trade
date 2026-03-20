@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DhanClient } from '../../dhan/client.js';
-import { BrokerAuthError, BrokerError } from '../../errors.js';
+import { BrokerAuthError } from '../../errors.js';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
@@ -29,7 +29,7 @@ describe('DhanClient constructor', () => {
   });
 });
 
-describe('DhanClient.request', () => {
+describe('DhanClient HTTP layer', () => {
   let client: DhanClient;
 
   beforeEach(() => {
@@ -40,7 +40,7 @@ describe('DhanClient.request', () => {
   it('sends correct auth headers', async () => {
     mockFetch.mockResolvedValue(makeResponse({ ok: true }));
 
-    await client.request('GET', '/positions');
+    await client.getPositions();
 
     expect(mockFetch).toHaveBeenCalledWith(
       'https://api.dhan.co/v2/positions',
@@ -58,23 +58,23 @@ describe('DhanClient.request', () => {
   it('serialises body as JSON for POST requests', async () => {
     mockFetch.mockResolvedValue(makeResponse({ orderId: '123' }));
 
-    await client.request('POST', '/orders', { symbol: 'RELIANCE', quantity: 5 });
+    await client.placeOrder({ symbol: 'RELIANCE', securityId: '500325', transactionType: 'BUY', quantity: 5, orderType: 'MARKET' });
 
     const call = mockFetch.mock.calls[0][1];
-    expect(JSON.parse(call.body)).toEqual({ symbol: 'RELIANCE', quantity: 5 });
+    expect(JSON.parse(call.body)).toMatchObject({ tradingSymbol: 'RELIANCE', quantity: 5 });
   });
 
   it('returns parsed JSON on success', async () => {
-    mockFetch.mockResolvedValue(makeResponse({ orderId: 'ORD001' }));
+    mockFetch.mockResolvedValue(makeResponse([{ orderId: 'ORD001' }]));
 
-    const result = await client.request('GET', '/orders/ORD001');
-    expect(result).toEqual({ orderId: 'ORD001' });
+    const result = await client.getOrders();
+    expect(result).toEqual([{ orderId: 'ORD001' }]);
   });
 
   it('throws BrokerAuthError when DH-901 error code is returned', async () => {
     mockFetch.mockResolvedValue(makeResponse({ errorCode: 'DH-901', errorMessage: 'Expired' }, 401));
 
-    await expect(client.request('GET', '/positions')).rejects.toThrow(BrokerAuthError);
+    await expect(client.getPositions()).rejects.toThrow(BrokerAuthError);
   });
 
   it('throws generic Error with message for non-auth API errors', async () => {
@@ -82,7 +82,7 @@ describe('DhanClient.request', () => {
       { errorCode: 'DH-500', errorMessage: 'Bad symbol' }, 400
     ));
 
-    await expect(client.request('GET', '/orders')).rejects.toThrow(/Bad symbol/);
+    await expect(client.getOrders()).rejects.toThrow(/Bad symbol/);
   });
 
   it('formats "status: failed" error response with field details', async () => {
@@ -90,15 +90,18 @@ describe('DhanClient.request', () => {
       { status: 'failed', data: { '600': 'Quantity must be positive' } }, 400
     ));
 
-    const err = await client.request('GET', '/orders').catch(e => e);
-    expect(err.message).toMatch(/Quantity must be positive/);
-    expect(err.message).toMatch(/code 600/);
+    await expect(client.getOrders()).rejects.toMatchObject({
+      message: expect.stringMatching(/Quantity must be positive/),
+    });
+    await expect(client.getOrders()).rejects.toMatchObject({
+      message: expect.stringMatching(/code 600/),
+    });
   });
 
   it('throws on non-ok response with plain text body', async () => {
     mockFetch.mockResolvedValue(makeResponse('Service Unavailable', 503));
 
-    await expect(client.request('GET', '/positions')).rejects.toThrow(/503/);
+    await expect(client.getPositions()).rejects.toThrow(/503/);
   });
 
   describe('429 retry logic', () => {
@@ -107,7 +110,7 @@ describe('DhanClient.request', () => {
         .mockResolvedValueOnce(makeResponse('', 429, { 'Retry-After': '0' }))
         .mockResolvedValueOnce(makeResponse({ ok: true }));
 
-      const result = await client.request('GET', '/positions');
+      const result = await client.getPositions();
       expect(result).toEqual({ ok: true });
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
@@ -116,7 +119,7 @@ describe('DhanClient.request', () => {
       // After 3 retries the final attempt falls through the retry guard and throws a 429 error
       mockFetch.mockResolvedValue(makeResponse('', 429, { 'Retry-After': '0' }));
 
-      await expect(client.request('GET', '/positions')).rejects.toThrow(/429/);
+      await expect(client.getPositions()).rejects.toThrow(/429/);
       expect(mockFetch).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
     });
 
@@ -127,7 +130,7 @@ describe('DhanClient.request', () => {
         .mockResolvedValueOnce(makeResponse('', 429, { 'Retry-After': '2' }))
         .mockResolvedValueOnce(makeResponse({ ok: true }));
 
-      await client.request('GET', '/positions');
+      await client.getPositions();
 
       expect(waitSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
       waitSpy.mockRestore();

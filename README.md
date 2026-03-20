@@ -2,7 +2,7 @@
 
 # Vibe Trade
 
-**Your portfolio. Your strategy. Running itself.**
+**AI trading agent for Indian stock markets (NSE). Describe your strategy in plain English — the agent builds the automation, monitors the market, and executes through your broker. Powered by Claude.**
 
 Vibe Trade is a local AI trading agent powered by Claude. Describe your strategy in plain English — the agent writes the Playbook, builds the automation stack, monitors the market around the clock, and comes to you with a reasoned case before touching your account.
 
@@ -184,6 +184,12 @@ Add your Anthropic API key and Dhan credentials at `http://localhost:3001/settin
 Everything runs on your machine. Your API key, credentials, trade history, and Playbooks never leave your local environment — stored in `~/.vibetrade/`.
 
 > **Start with chat before automation.** Ask the agent to look at your positions, fetch a quote, explain a stock's technicals. Once you're comfortable with how it reasons and what tools it has, give it a Playbook and let it run.
+
+---
+
+## Built with
+
+Next.js 15 · React 19 · Claude (Anthropic) · Dhan Broker API · Node.js · TypeScript
 
 ---
 

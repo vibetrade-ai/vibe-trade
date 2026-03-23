@@ -1,19 +1,13 @@
 import "dotenv/config";
 import { existsSync, renameSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
-import { resolve, join } from "path";
+import { join } from "path";
 import Fastify from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyCors from "@fastify/cors";
-import fastifyStatic from "@fastify/static";
-import { statusRoute } from "./routes/status.js";
-import { chatRoute } from "./routes/chat.js";
-import { conversationsRoute } from "./routes/conversations.js";
-import { approvalsRoute } from "./routes/approvals.js";
-import { triggersRoute } from "./routes/triggers.js";
-import { strategiesRoute } from "./routes/strategies.js";
-import { portfoliosRoute } from "./routes/portfolios.js";
-import { settingsRoute } from "./routes/settings.js";
+import { intentsRoute } from "./routes/intents.js";
+import { brokerChatRoute } from "./routes/broker-chat.js";
+import { harnessPlugin } from "./harness-plugin.js";
 import { createStorageProvider } from "./lib/storage/index.js";
 import { credentialsStore, getBrokerAdapter } from "./lib/credentials.js";
 import { HeartbeatService } from "./lib/heartbeat/service.js";
@@ -22,11 +16,6 @@ import { computeNextRunAt, computeNextTradingRunAt } from "./lib/heartbeat/cron-
 import type { Trigger } from "./lib/heartbeat/types.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
-
-// Auto-detect CLI/standalone mode: if frontend/out/ exists next to the package root, serve it
-const projectRoot = resolve(__dirname, "../../");
-const staticDir = join(projectRoot, "frontend", "out");
-const serveStatic = existsSync(staticDir);
 
 const fastify = Fastify({ logger: { level: "info" } });
 
@@ -133,50 +122,38 @@ async function start() {
   await credentialsStore.load();
 
   await fastify.register(fastifyCors, {
-    origin: serveStatic
-      ? true
-      : (origin: string | undefined, callback: (err: Error | null, allow: boolean) => void) => {
-          const allowed = (process.env.FRONTEND_URLS ?? "http://localhost:3000,http://localhost:3002,http://localhost:3003")
-            .split(",").map((u: string) => u.trim());
-          if (!origin || allowed.includes(origin)) callback(null, true);
-          else callback(new Error("Not allowed by CORS"), false);
-        },
+    origin: (origin: string | undefined, callback: (err: Error | null, allow: boolean) => void) => {
+      const allowed = (process.env.FRONTEND_URLS ?? "http://localhost:3000,http://localhost:3002,http://localhost:3003")
+        .split(",").map((u: string) => u.trim());
+      if (!origin || allowed.includes(origin)) callback(null, true);
+      else callback(new Error("Not allowed by CORS"), false);
+    },
     methods: ["GET", "POST", "PATCH", "DELETE"],
   });
 
   await fastify.register(fastifyWebsocket);
 
-  await fastify.register(statusRoute);
-  await fastify.register(settingsRoute);
-  await fastify.register(chatRoute, {
-    store: storage.conversations,
-    memory: storage.memory,
+  await fastify.register(harnessPlugin, { storage });
+
+  await fastify.register(intentsRoute, {
+    intents: storage.intents,
     triggers: storage.triggers,
-    triggerAudit: storage.triggerAudit,
-    approvals: storage.approvals,
+    portfolios: storage.portfolios,
     strategies: storage.strategies,
     trades: storage.trades,
-    portfolios: storage.portfolios,
+    approvals: storage.approvals,
   });
-  await fastify.register(conversationsRoute, { store: storage.conversations });
-  await fastify.register(approvalsRoute, { approvals: storage.approvals, triggers: storage.triggers, trades: storage.trades });
-  await fastify.register(triggersRoute, { triggers: storage.triggers, triggerAudit: storage.triggerAudit });
-  await fastify.register(strategiesRoute, { strategies: storage.strategies, triggers: storage.triggers, trades: storage.trades });
-  await fastify.register(portfoliosRoute, { portfolios: storage.portfolios, triggers: storage.triggers, trades: storage.trades });
+  await fastify.register(brokerChatRoute, {
+    store: storage.conversations,
+    intents: storage.intents,
+    triggers: storage.triggers,
+    portfolios: storage.portfolios,
+    strategies: storage.strategies,
+    trades: storage.trades,
+    approvals: storage.approvals,
+  });
 
   fastify.get("/health", async () => ({ ok: true }));
-
-  // CLI/standalone mode: serve the static frontend and add SPA fallback
-  if (serveStatic) {
-    console.log(`[static] Serving frontend from ${staticDir}`);
-    await fastify.register(fastifyStatic, { root: staticDir, prefix: "/", wildcard: false });
-    fastify.setNotFoundHandler(async (request, reply) => {
-      if (request.url.startsWith("/api/") || request.url.startsWith("/ws/")) {
-        return reply.status(404).send({ error: "Not found" });
-      }
-      return reply.sendFile("index.html");
-    });
-  }
 
   try {
     await fastify.listen({ port: PORT, host: "0.0.0.0" });

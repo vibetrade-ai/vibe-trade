@@ -11,7 +11,8 @@ export type ServerMessage =
   | { type: "tool_approval_request"; requestId: string; tool: string; args: object; description: string }
   | { type: "done" }
   | { type: "token_expired" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "intent_created"; intentId: string };
 
 export interface ConversationMessage {
   role: "user" | "assistant";

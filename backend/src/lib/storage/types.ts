@@ -119,6 +119,51 @@ export interface CredentialsStore {
   write(data: Record<string, string>): Promise<void>;
 }
 
+export type IntentType = "atomic" | "conditional" | "scheduled" | "agentic" | "composite";
+export type IntentStatus = "processing" | "clarifying" | "planning" | "active" | "completed" | "failed" | "cancelled";
+
+export interface ClarificationOption {
+  value: string;
+  label: string;
+  recommended?: boolean;
+}
+
+export interface ClarificationQuestion {
+  id: string;
+  question: string;
+  options: ClarificationOption[];
+}
+
+export interface IntentPrimitive {
+  type: "order" | "trigger" | "portfolio" | "strategy";
+  id: string;
+}
+
+export interface Intent {
+  id: string;
+  text: string;
+  type?: IntentType;
+  status: IntentStatus;
+  summary?: string;
+  entryCondition?: string;
+  exitCondition?: string;
+  primitives: IntentPrimitive[];
+  portfolioId?: string;
+  clarifications?: ClarificationQuestion[];
+  plan?: string;
+  planSummary?: string;
+  planFeedback?: string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface IntentStore {
+  append(intent: Intent): Promise<void>;
+  list(filter?: { status?: IntentStatus | IntentStatus[] }): Promise<Intent[]>;
+  get(id: string): Promise<Intent | null>;
+  update(id: string, patch: Partial<Intent>): Promise<void>;
+}
+
 export interface StorageProvider {
   conversations: ConversationStore;
   memory: MemoryStore;
@@ -129,4 +174,5 @@ export interface StorageProvider {
   trades: TradeStore;
   credentials: CredentialsStore;
   portfolios: PortfolioStore;
+  intents: IntentStore;
 }

@@ -14,6 +14,8 @@ export { type TradeStore } from "./types.js";
 export { type TradeRecord, type TradeStatus } from "./types.js";
 export { type CredentialsStore } from "./types.js";
 export { type PortfolioStore, type Portfolio, type PortfolioStatus } from "./types.js";
+export { type IntentStore } from "./types.js";
+export { type Intent, type IntentType, type IntentStatus, type IntentPrimitive, type ClarificationQuestion, type ClarificationOption } from "./types.js";
 
 export function createStorageProvider(): StorageProvider {
   // Later: if (process.env.DATABASE_URL) return new DatabaseStorageProvider(...)

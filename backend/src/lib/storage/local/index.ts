@@ -8,6 +8,7 @@ import { LocalStrategyStore } from "./strategy-store.js";
 import { LocalTradeStore } from "./trade-store.js";
 import { LocalCredentialsStore } from "./credentials-store.js";
 import { LocalPortfolioStore } from "./portfolio-store.js";
+import { LocalIntentStore } from "./intent-store.js";
 
 export class LocalStorageProvider implements StorageProvider {
   conversations: LocalConversationStore;
@@ -19,6 +20,7 @@ export class LocalStorageProvider implements StorageProvider {
   trades: LocalTradeStore;
   credentials: LocalCredentialsStore;
   portfolios: LocalPortfolioStore;
+  intents: LocalIntentStore;
 
   constructor(dataDir: string) {
     this.conversations = new LocalConversationStore(dataDir);
@@ -30,5 +32,6 @@ export class LocalStorageProvider implements StorageProvider {
     this.trades = new LocalTradeStore(dataDir);
     this.credentials = new LocalCredentialsStore(dataDir);
     this.portfolios = new LocalPortfolioStore(dataDir);
+    this.intents = new LocalIntentStore(dataDir);
   }
 }

@@ -1,0 +1,26 @@
+# Source code
+backend/src/
+frontend/src/
+frontend/.next/
+frontend/node_modules/
+backend/node_modules/
+
+# Config / dev files
+backend/tsconfig.json
+frontend/tsconfig.json
+frontend/tsconfig.tsbuildinfo
+frontend/next.config.ts
+frontend/postcss.config.mjs
+frontend/next-env.d.ts
+ADR/
+DHAN_TOOLS.md
+MARKET_DATA_TOOLS.md
+
+# Git
+.git/
+.gitignore
+
+# Secrets / runtime data
+backend/data/
+.env*
+frontend/.env*

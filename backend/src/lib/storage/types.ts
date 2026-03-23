@@ -1,16 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Trigger, TriggerStatus, PendingApproval, ApprovalStatus, TriggerAuditEntry } from "../heartbeat/types.js";
 
-export type StrategyState = "scanning" | "accumulating" | "holding" | "exiting" | "paused";
-export type StrategyStatus = "active" | "archived";
-
 export interface Strategy {
   id: string;
   name: string;
   description: string;
   plan: string;
-  state: StrategyState;
-  status: StrategyStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -22,8 +17,6 @@ export interface Portfolio {
   name: string;
   description: string;
   allocation: number;
-  benchmark?: string;
-  strategyIds: string[];
   status: PortfolioStatus;
   createdAt: string;
   updatedAt: string;
@@ -34,16 +27,13 @@ export interface PortfolioStore {
   get(id: string): Promise<Portfolio | null>;
   upsert(portfolio: Portfolio): Promise<void>;
   setStatus(id: string, status: PortfolioStatus): Promise<void>;
-  addStrategy(portfolioId: string, strategyId: string): Promise<void>;
-  removeStrategy(portfolioId: string, strategyId: string): Promise<void>;
 }
 
 export interface StrategyStore {
-  list(filter?: { status?: StrategyStatus }): Promise<Strategy[]>;
+  list(): Promise<Strategy[]>;
   get(id: string): Promise<Strategy | null>;
   upsert(strategy: Strategy): Promise<void>;
-  setStatus(id: string, status: StrategyStatus): Promise<void>;
-  setState(id: string, state: StrategyState): Promise<void>;
+  delete(id: string): Promise<void>;
   updatePlan(id: string, plan: string): Promise<void>;
 }
 
@@ -101,6 +91,7 @@ export interface TradeRecord {
   status: TradeStatus;
   strategyId?: string;
   portfolioId?: string;
+  intentId?: string;
   note?: string;
   realizedPnl?: number;
   createdAt: string;
@@ -113,6 +104,7 @@ export interface TradeStore {
   list(filter?: {
     strategyId?: string;
     portfolioId?: string;
+    intentId?: string;
     symbol?: string;
     fromDate?: string;
     toDate?: string;

@@ -159,7 +159,7 @@ async function start() {
     portfolios: storage.portfolios,
   });
   await fastify.register(conversationsRoute, { store: storage.conversations });
-  await fastify.register(approvalsRoute, { approvals: storage.approvals, triggers: storage.triggers });
+  await fastify.register(approvalsRoute, { approvals: storage.approvals, triggers: storage.triggers, trades: storage.trades });
   await fastify.register(triggersRoute, { triggers: storage.triggers, triggerAudit: storage.triggerAudit });
   await fastify.register(strategiesRoute, { strategies: storage.strategies, triggers: storage.triggers, trades: storage.trades });
   await fastify.register(portfoliosRoute, { portfolios: storage.portfolios, triggers: storage.triggers, trades: storage.trades });

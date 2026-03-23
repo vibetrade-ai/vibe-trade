@@ -77,9 +77,21 @@ const READ_ONLY_TOOLS = [
   "fetch_news", "get_market_status", "get_top_movers", "search_instruments",
 ];
 
+const GET_PORTFOLIO_HOLDINGS_TOOL: Anthropic.Tool = {
+  name: "get_portfolio_holdings",
+  description: "Get current holdings for a portfolio computed from filled trades. Returns net quantities and average buy prices per symbol. Use this instead of get_positions for long-term equity portfolios.",
+  input_schema: {
+    type: "object",
+    properties: {
+      portfolioId: { type: "string", description: "Portfolio ID" },
+    },
+    required: ["portfolioId"],
+  },
+};
+
 const RUNNER_SYSTEM = `You are VibeTrade's autonomous analysis engine. A trigger has fired and you must analyze the situation and decide on a course of action.
 
-Available read-only tools: get_quote, get_index_quote, get_positions, get_funds, get_historical_data, compute_indicators, get_fundamentals, fetch_news, get_market_status, get_top_movers, search_instruments
+Available read-only tools: get_quote, get_index_quote, get_positions, get_funds, get_historical_data, compute_indicators, get_fundamentals, fetch_news, get_market_status, get_top_movers, search_instruments, get_portfolio_holdings (use this for long-term equity portfolio holdings — get_positions only shows intraday Dhan positions)
 
 Available action tools:
 - register_soft_trigger: Register a new soft (reasoning_job) trigger directly, no approval needed
@@ -136,6 +148,8 @@ const RUNNER_TOOLS: Anthropic.Tool[] = [
         quantity: { type: "number" },
         order_type: { type: "string", enum: ["MARKET", "LIMIT"] },
         price: { type: "number", description: "Required for LIMIT orders" },
+        product_type: { type: "string", enum: ["CNC", "INTRADAY"], description: "CNC for equity delivery (default), INTRADAY for same-day only" },
+        portfolioId: { type: "string", description: "Portfolio ID to tag this trade to (for holdings tracking)" },
       },
       required: ["reasoning", "symbol", "transaction_type", "quantity", "order_type"],
     },
@@ -210,7 +224,7 @@ export async function runReasoningJob(
   const memoryContent = await memory.read().catch(() => "");
   let systemPrompt = RUNNER_SYSTEM + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
 
-  // Inject portfolio context (primary) if trigger has portfolioId
+  // Inject portfolio context if trigger has portfolioId
   if (trigger.portfolioId && portfolioStore) {
     const portfolio = await portfolioStore.get(trigger.portfolioId).catch(() => null);
     if (portfolio) {
@@ -220,7 +234,6 @@ export async function runReasoningJob(
         return;
       }
 
-      // Compute available capital
       let deployedCapital = 0;
       if (tradeStore) {
         const filledTrades = await tradeStore.list({ portfolioId: portfolio.id, status: "filled" });
@@ -228,43 +241,27 @@ export async function runReasoningJob(
       }
       const availableCapital = portfolio.allocation - deployedCapital;
 
-      // Inject attached strategy plans
-      const strategyBlocks: string[] = [];
-      if (strategyStore && portfolio.strategyIds.length > 0) {
-        for (const sid of portfolio.strategyIds) {
-          const strategy = await strategyStore.get(sid).catch(() => null);
-          if (strategy && strategy.status !== "archived") {
-            strategyBlocks.push(`<strategy name="${strategy.name}">
-State: ${strategy.state}
-
-${strategy.plan}
-</strategy>`);
-          }
-        }
-      }
-
       systemPrompt += `\n\n<portfolio name="${portfolio.name}">
-Allocation: ₹${portfolio.allocation.toLocaleString("en-IN")}  |  Deployed: ₹${deployedCapital.toFixed(2)}  |  Available: ₹${availableCapital.toFixed(2)}${portfolio.benchmark ? `  |  Benchmark: ${portfolio.benchmark}` : ""}
-${strategyBlocks.length > 0 ? "\n" + strategyBlocks.join("\n") : ""}
+Allocation: ₹${portfolio.allocation.toLocaleString("en-IN")}  |  Deployed: ₹${deployedCapital.toFixed(2)}  |  Available: ₹${availableCapital.toFixed(2)}
 </portfolio>`;
     }
-  } else if (trigger.strategyId && strategyStore) {
-    // Backward compat: inject strategy context for triggers created before portfolio refactor
+  }
+
+  // Inject strategy context if trigger has strategyId (sibling block, independent of portfolio)
+  if (trigger.strategyId && strategyStore) {
     const strategy = await strategyStore.get(trigger.strategyId).catch(() => null);
+    if (!strategy) {
+      console.warn(`[heartbeat] trigger ${trigger.id} linked to deleted strategy ${trigger.strategyId} — cancelling`);
+      await triggerStore.setStatus(trigger.id, "cancelled");
+      return;
+    }
     if (strategy) {
-      if (strategy.status === "archived") {
-        console.warn(`[heartbeat] trigger ${trigger.id} linked to archived strategy ${trigger.strategyId} — cancelling`);
-        await triggerStore.setStatus(trigger.id, "cancelled");
-        return;
-      }
       const activeTriggers = await triggerStore.list({ status: "active" });
       const linkedTriggers = activeTriggers.filter(t => t.strategyId === strategy.id);
       const triggersBlock = linkedTriggers.length > 0
         ? linkedTriggers.map(t => `- "${t.name}": ${JSON.stringify(t.condition)} → ${t.action.type}`).join("\n")
         : "None";
       systemPrompt += `\n\n<strategy name="${strategy.name}">
-State: ${strategy.state}
-
 ## Plan
 ${strategy.plan}
 
@@ -280,6 +277,7 @@ ${triggersBlock}
 
   const allTools: Anthropic.Tool[] = [
     ...READ_ONLY_TOOLS.map(name => TOOLS[name]!.definition),
+    GET_PORTFOLIO_HOLDINGS_TOOL,
     ...RUNNER_TOOLS,
   ];
 
@@ -360,6 +358,7 @@ Analyze the situation and take appropriate action.`;
               quantity: args.quantity as number,
               order_type: args.order_type as "MARKET" | "LIMIT",
               price: args.price as number | undefined,
+              product_type: (args.product_type as "CNC" | "INTRADAY" | undefined) ?? "CNC",
             };
             const id = randomUUID();
             const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
@@ -370,6 +369,8 @@ Analyze the situation and take appropriate action.`;
               tradeArgs, status: "pending",
               createdAt: new Date().toISOString(), expiresAt: expiry,
               ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+              ...((args.portfolioId as string | undefined) ?? trigger.portfolioId ? { portfolioId: (args.portfolioId as string | undefined) ?? trigger.portfolioId } : {}),
+              ...(trigger.intentId ? { intentId: trigger.intentId } : {}),
             });
             approvalId = id;
             summaryUpdate = "trade";
@@ -392,6 +393,9 @@ Analyze the situation and take appropriate action.`;
                 action: { type: "hard_order", tradeArgs: args.tradeArgs as TradeArgs },
                 expiresAt: args.expiresAt as string | undefined,
                 status: "active" as const,
+                ...(trigger.intentId ? { intentId: trigger.intentId } : {}),
+                ...(trigger.portfolioId ? { portfolioId: trigger.portfolioId } : {}),
+                ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
               },
               status: "pending",
               createdAt: new Date().toISOString(), expiresAt: expiry,
@@ -413,6 +417,7 @@ Analyze the situation and take appropriate action.`;
               active: true,
               status: "active",
               ...(trigger.strategyId ? { strategyId: trigger.strategyId } : {}),
+              ...(trigger.intentId ? { intentId: trigger.intentId } : {}),
               ...(args.context ? { context: args.context as string } : {}),
             };
             await triggerStore.upsert(newTrigger);
@@ -467,6 +472,36 @@ Analyze the situation and take appropriate action.`;
                 resultCache.set(cacheKey, summary);
                 resultText = summary;
               }
+            }
+
+          } else if (toolUse.name === "get_portfolio_holdings") {
+            if (!tradeStore) {
+              resultText = JSON.stringify({ error: "Trade store not available" });
+            } else {
+              const portfolioId = args.portfolioId as string;
+              const filled = await tradeStore.list({ portfolioId, status: "filled" });
+              const netQty: Record<string, number> = {};
+              const weightedCost: Record<string, number> = {};
+              for (const t of filled) {
+                const sym = t.symbol.toUpperCase();
+                if (!(sym in netQty)) { netQty[sym] = 0; weightedCost[sym] = 0; }
+                if (t.transactionType === "BUY") {
+                  const price = t.executedPrice ?? t.requestedPrice ?? 0;
+                  weightedCost[sym] = (weightedCost[sym] * netQty[sym] + price * t.quantity) / (netQty[sym] + t.quantity || 1);
+                  netQty[sym] += t.quantity;
+                } else {
+                  netQty[sym] -= t.quantity;
+                }
+              }
+              const holdings = Object.entries(netQty)
+                .filter(([, qty]) => qty > 0)
+                .map(([symbol, quantity]) => ({
+                  symbol,
+                  quantity,
+                  avgBuyPrice: +weightedCost[symbol].toFixed(2),
+                  deployedCapital: +(weightedCost[symbol] * quantity).toFixed(2),
+                }));
+              resultText = JSON.stringify(holdings, null, 2);
             }
 
           } else {

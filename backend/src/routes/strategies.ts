@@ -6,18 +6,9 @@ export async function strategiesRoute(
   fastify: FastifyInstance,
   opts: { strategies: StrategyStore; triggers: TriggerStore; trades: TradeStore },
 ) {
-  // GET /api/strategies — list
-  fastify.get("/api/strategies", async (request) => {
-    const query = request.query as { status?: string };
-    const statusFilter = query.status === "archived" ? "archived" : query.status === "all" ? undefined : "active";
-    if (query.status === "all") {
-      const [active, archived] = await Promise.all([
-        opts.strategies.list({ status: "active" }),
-        opts.strategies.list({ status: "archived" }),
-      ]);
-      return [...active, ...archived];
-    }
-    return opts.strategies.list(statusFilter ? { status: statusFilter as "active" | "archived" } : undefined);
+  // GET /api/strategies — list all
+  fastify.get("/api/strategies", async () => {
+    return opts.strategies.list();
   });
 
   // POST /api/strategies — create
@@ -30,8 +21,6 @@ export async function strategiesRoute(
       name: body.name as string,
       description: body.description as string,
       plan: body.plan as string,
-      state: (body.state as string ?? "scanning") as import("../lib/storage/types.js").StrategyState,
-      status: "active" as const,
       createdAt: now,
       updatedAt: now,
     };
@@ -53,19 +42,6 @@ export async function strategiesRoute(
     return { ...strategy, linkedTriggers };
   });
 
-  // PATCH /api/strategies/:id/state — update state
-  fastify.patch("/api/strategies/:id/state", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const body = request.body as { state: string };
-    const strategy = await opts.strategies.get(id);
-    if (!strategy) {
-      reply.code(404);
-      return { error: "Not found" };
-    }
-    await opts.strategies.setState(id, body.state as import("../lib/storage/types.js").StrategyState);
-    return { success: true };
-  });
-
   // PATCH /api/strategies/:id/plan — update plan text
   fastify.patch("/api/strategies/:id/plan", async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -79,13 +55,13 @@ export async function strategiesRoute(
     return { success: true };
   });
 
-  // DELETE /api/strategies/:id — archive (with open-position guard + cascade)
+  // DELETE /api/strategies/:id — delete (with open-position guard + cascade)
   fastify.delete("/api/strategies/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const strategy = await opts.strategies.get(id);
     if (!strategy) { reply.code(404); return { error: "Not found" }; }
 
-    // Guard: block archive if strategy has open positions
+    // Guard: block delete if strategy has open positions
     const filled = await opts.trades.list({ strategyId: id, status: "filled" });
     const openPositions = computeOpenPositions(filled);
     if (openPositions.length > 0) {
@@ -93,7 +69,7 @@ export async function strategiesRoute(
       return {
         error: "Strategy has open positions",
         openPositions: openPositions.map(p => ({ symbol: p.symbol, quantity: p.quantity })),
-        hint: "Close all tagged positions in the broker before archiving",
+        hint: "Close all tagged positions in the broker before deleting",
       };
     }
 
@@ -102,7 +78,7 @@ export async function strategiesRoute(
     const triggersCancelled = linkedTriggers.filter(t => t.strategyId === id);
 
     await Promise.all(triggersCancelled.map(t => opts.triggers.setStatus(t.id, "cancelled")));
-    await opts.strategies.setStatus(id, "archived");
+    await opts.strategies.delete(id);
 
     return {
       success: true,

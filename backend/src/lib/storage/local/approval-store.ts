@@ -10,9 +10,8 @@ export class LocalApprovalStore extends JsonArrayStore<PendingApproval> implemen
 
   async list(filter?: { status?: ApprovalStatus }): Promise<PendingApproval[]> {
     const all = await this.load();
-    const status = filter?.status ?? "pending";
-    if ((status as string) === "all") return [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return all.filter(a => a.status === status).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (!filter?.status) return [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return all.filter(a => a.status === filter.status).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   async get(id: string): Promise<PendingApproval | null> {

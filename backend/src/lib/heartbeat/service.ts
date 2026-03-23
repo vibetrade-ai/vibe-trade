@@ -160,6 +160,13 @@ export class HeartbeatService {
       await this.approvals.pruneExpired();
       await this.triggers.pruneExpired();
 
+      if (this.tradeStore) {
+        const r = await syncOrders(this.broker, this.tradeStore);
+        if (r.fillsUpdated + r.rejectedOrCancelled > 0) {
+          console.log(`[heartbeat] order-sync: ${r.fillsUpdated} filled, ${r.rejectedOrCancelled} rejected/cancelled`);
+        }
+      }
+
       const activeTriggers = await this.triggers.list({ status: ["active", "paused"] });
       const activeOnly = activeTriggers.filter(t => t.status === "active");
 
@@ -228,16 +235,6 @@ export class HeartbeatService {
         console.log(`[heartbeat] fired: ${firedIds.join(", ")}`);
       }
 
-      const hasReasoningJob = firedIds.some(id =>
-        activeOnly.find(t => t.id === id)?.action.type === "reasoning_job"
-      );
-      if (hasReasoningJob && this.tradeStore) {
-        const r = await syncOrders(this.broker, this.tradeStore);
-        if (r.fillsUpdated + r.rejectedOrCancelled > 0) {
-          console.log(`[heartbeat] order-sync: ${r.fillsUpdated} filled, ${r.rejectedOrCancelled} rejected/cancelled`);
-        }
-      }
-
       for (const id of firedIds) {
         const trigger = activeOnly.find(t => t.id === id);
         if (!trigger) continue;
@@ -274,6 +271,7 @@ export class HeartbeatService {
                   firedAt: nowIso, snapshotAtFire: snapshot, action: trigger.action,
                   outcome: { type: "hard_order_failed", error: reason },
                   portfolioId: trigger.portfolioId,
+                  intentId: trigger.intentId,
                 });
                 continue;
               }
@@ -290,7 +288,7 @@ export class HeartbeatService {
               side: tradeArgs.transaction_type,
               quantity: tradeArgs.quantity,
               orderType: tradeArgs.order_type,
-              productType: "INTRADAY",
+              productType: tradeArgs.product_type === "INTRADAY" ? "INTRADAY" : "DELIVERY",
               price: tradeArgs.price,
             });
             const orderId = orderResult.orderId ?? randomUUID();
@@ -299,6 +297,7 @@ export class HeartbeatService {
               id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
               firedAt: nowIso, snapshotAtFire: snapshot, action: trigger.action,
               outcome: { type: "hard_order_placed", orderId },
+              intentId: trigger.intentId,
             });
             if (this.tradeStore) {
               await this.tradeStore.append({
@@ -313,6 +312,7 @@ export class HeartbeatService {
                 status: "pending",
                 strategyId: trigger.strategyId,
                 portfolioId: trigger.portfolioId,
+                intentId: trigger.intentId,
                 note: `Auto-placed by trigger: ${trigger.name}`,
                 createdAt: nowIso,
               });
@@ -324,6 +324,7 @@ export class HeartbeatService {
               id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name,
               firedAt: nowIso, snapshotAtFire: snapshot, action: trigger.action,
               outcome: { type: "hard_order_failed", error },
+              intentId: trigger.intentId,
             });
             console.error(`[heartbeat] hard_order failed for trigger ${trigger.id}:`, err);
           }

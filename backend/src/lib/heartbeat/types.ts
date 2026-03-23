@@ -8,6 +8,7 @@ export interface TradeArgs {
   quantity: number;
   order_type: "MARKET" | "LIMIT";
   price?: number;
+  product_type?: "CNC" | "INTRADAY";
 }
 
 export type EventKind =
@@ -78,6 +79,8 @@ export interface Trigger {
   lastFiredAt?: string;
   /** Portfolio this trigger is attributed to */
   portfolioId?: string;
+  /** Intent that created this trigger */
+  intentId?: string;
 }
 
 export interface QuoteEntry {
@@ -123,6 +126,8 @@ export type PendingApproval =
       expiresAt: string;
       decidedAt?: string;
       strategyId?: string;
+      portfolioId?: string;
+      intentId?: string;
     }
   | {
       id: string;
@@ -136,6 +141,7 @@ export type PendingApproval =
       expiresAt: string;
       decidedAt?: string;
       strategyId?: string;
+      intentId?: string;
     };
 
 export interface TriggerAuditEntry {
@@ -153,6 +159,7 @@ export interface TriggerAuditEntry {
     | { type: "reasoning_job_completed"; summary: string; approvalIds: string[]; durationMs: number };
   strategyId?: string;
   portfolioId?: string;
+  intentId?: string;
   reasoningSummary?: string;
 }
 

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { credentialsStore } from "../lib/credentials.js";
+import { BrokerAuthError } from "../lib/brokers/errors.js";
 
 export async function settingsRoute(fastify: FastifyInstance) {
   fastify.get("/api/settings", async () => {
@@ -29,5 +30,22 @@ export async function settingsRoute(fastify: FastifyInstance) {
     await credentialsStore.update(patch);
     const status = credentialsStore.status();
     return { success: true, status };
+  });
+
+  fastify.get("/api/settings/broker-status", async () => {
+    const { DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID } = credentialsStore.status();
+    if (!DHAN_ACCESS_TOKEN || !DHAN_CLIENT_ID) {
+      return { configured: false, connected: false, expired: false };
+    }
+    try {
+      const adapter = credentialsStore.getBrokerAdapter();
+      await adapter.getFunds();
+      return { configured: true, connected: true, expired: false };
+    } catch (err) {
+      if (err instanceof BrokerAuthError) {
+        return { configured: true, connected: false, expired: true };
+      }
+      return { configured: true, connected: false, expired: false, error: (err as Error).message };
+    }
   });
 }

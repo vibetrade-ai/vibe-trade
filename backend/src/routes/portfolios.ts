@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { PortfolioStore, TriggerStore, TradeStore, TradeRecord } from "../lib/storage/index.js";
 import { computeOpenPositions } from "../lib/trade-utils.js";
+import { getBrokerAdapter } from "../lib/credentials.js";
 
 export async function portfoliosRoute(
   fastify: FastifyInstance,
@@ -26,8 +27,6 @@ export async function portfoliosRoute(
       name: body.name as string,
       description: (body.description as string) ?? "",
       allocation: body.allocation as number,
-      benchmark: body.benchmark as string | undefined,
-      strategyIds: (body.strategyIds as string[]) ?? [],
       status: "active" as const,
       createdAt: now,
       updatedAt: now,
@@ -63,30 +62,6 @@ export async function portfoliosRoute(
     return { success: true };
   });
 
-  // POST /api/portfolios/:id/strategies/:strategyId — attach strategy
-  fastify.post("/api/portfolios/:id/strategies/:strategyId", async (request, reply) => {
-    const { id, strategyId } = request.params as { id: string; strategyId: string };
-    const portfolio = await opts.portfolios.get(id);
-    if (!portfolio) {
-      reply.code(404);
-      return { error: "Not found" };
-    }
-    await opts.portfolios.addStrategy(id, strategyId);
-    return { success: true };
-  });
-
-  // DELETE /api/portfolios/:id/strategies/:strategyId — detach strategy
-  fastify.delete("/api/portfolios/:id/strategies/:strategyId", async (request, reply) => {
-    const { id, strategyId } = request.params as { id: string; strategyId: string };
-    const portfolio = await opts.portfolios.get(id);
-    if (!portfolio) {
-      reply.code(404);
-      return { error: "Not found" };
-    }
-    await opts.portfolios.removeStrategy(id, strategyId);
-    return { success: true };
-  });
-
   // GET /api/portfolios/:id/performance — P&L, win rate, deployed capital, open positions
   fastify.get("/api/portfolios/:id/performance", async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -109,8 +84,31 @@ export async function portfoliosRoute(
     const bestTrade = sellsWithPnl.reduce<TradeRecord | null>((b, t) => !b || t.realizedPnl! > b.realizedPnl! ? t : b, null);
     const worstTrade = sellsWithPnl.reduce<TradeRecord | null>((w, t) => !w || t.realizedPnl! < w.realizedPnl! ? t : w, null);
 
-    const openPositions = computeOpenPositions(filled);
-    const deployedCapital = openPositions.reduce((s, p) => s + p.deployedCapital, 0);
+    const rawPositions = computeOpenPositions(filled);
+    const deployedCapital = rawPositions.reduce((s, p) => s + p.deployedCapital, 0);
+
+    type EnrichedPosition = (typeof rawPositions)[number] & { ltp?: number; unrealizedPnl?: number };
+    const openPositions: EnrichedPosition[] = rawPositions.map(p => ({ ...p }));
+    let unrealizedPnl = 0;
+
+    if (rawPositions.length > 0) {
+      try {
+        const broker = getBrokerAdapter();
+        const quotes = await broker.getQuote(rawPositions.map(p => p.symbol));
+        const ltpMap = Object.fromEntries(quotes.map(q => [q.symbol.toUpperCase(), q.lastPrice]));
+        for (const pos of openPositions) {
+          const ltp = ltpMap[pos.symbol.toUpperCase()];
+          if (ltp != null && ltp > 0) {
+            pos.ltp = ltp;
+            pos.unrealizedPnl = +((ltp - pos.avgBuyPrice) * pos.quantity).toFixed(2);
+            unrealizedPnl += pos.unrealizedPnl;
+          }
+        }
+        unrealizedPnl = +unrealizedPnl.toFixed(2);
+      } catch (err) {
+        console.warn("[portfolios/performance] LTP fetch failed:", err instanceof Error ? err.message : err);
+      }
+    }
 
     return {
       portfolioId: id,
@@ -124,10 +122,12 @@ export async function portfoliosRoute(
       buyTrades: buys.length,
       sellTrades: sells.length,
       totalRealizedPnl,
+      unrealizedPnl,
       winRate,
       bestTrade: bestTrade ? { symbol: bestTrade.symbol, pnl: bestTrade.realizedPnl!, date: bestTrade.filledAt } : null,
       worstTrade: worstTrade ? { symbol: worstTrade.symbol, pnl: worstTrade.realizedPnl!, date: worstTrade.filledAt } : null,
       openPositions,
+      trades: allTrades,
     };
   });
 

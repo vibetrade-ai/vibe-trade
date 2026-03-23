@@ -130,15 +130,13 @@ export async function chatRoute(fastify: FastifyInstance, opts: { store: Convers
           const mentionPattern = /@([\w\s-]+)/g;
           const matches = [...String(lastUserMsg.content).matchAll(mentionPattern)];
           if (matches.length > 0) {
-            const allStrategies = await opts.strategies.list({ status: "active" });
+            const allStrategies = await opts.strategies.list();
             const strategyBlocks: string[] = [];
             for (const match of matches) {
               const mentionName = match[1].trim().toLowerCase();
               const resolved = allStrategies.find(s => s.name.toLowerCase().includes(mentionName));
               if (resolved) {
                 strategyBlocks.push(`<strategy name="${resolved.name}">
-State: ${resolved.state}
-
 ${resolved.plan}
 </strategy>`);
               }

@@ -9,7 +9,7 @@ export { type TriggerStore } from "./types.js";
 export { type ApprovalStore } from "./types.js";
 export { type TriggerAuditStore } from "./types.js";
 export { type StrategyStore } from "./types.js";
-export { type Strategy, type StrategyState, type StrategyStatus } from "./types.js";
+export { type Strategy } from "./types.js";
 export { type TradeStore } from "./types.js";
 export { type TradeRecord, type TradeStatus } from "./types.js";
 export { type CredentialsStore } from "./types.js";

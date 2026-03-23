@@ -40,29 +40,5 @@ export class LocalPortfolioStore extends JsonArrayStore<Portfolio> implements Po
     await this.save(all);
   }
 
-  async addStrategy(portfolioId: string, strategyId: string): Promise<void> {
-    const all = await this.load();
-    const idx = all.findIndex(p => p.id === portfolioId);
-    if (idx < 0) return;
-    if (!all[idx].strategyIds.includes(strategyId)) {
-      all[idx] = {
-        ...all[idx],
-        strategyIds: [...all[idx].strategyIds, strategyId],
-        updatedAt: new Date().toISOString(),
-      };
-      await this.save(all);
-    }
-  }
 
-  async removeStrategy(portfolioId: string, strategyId: string): Promise<void> {
-    const all = await this.load();
-    const idx = all.findIndex(p => p.id === portfolioId);
-    if (idx < 0) return;
-    all[idx] = {
-      ...all[idx],
-      strategyIds: all[idx].strategyIds.filter(id => id !== strategyId),
-      updatedAt: new Date().toISOString(),
-    };
-    await this.save(all);
-  }
 }
